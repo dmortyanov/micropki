@@ -245,8 +245,15 @@ def issue_certificate(
     out_dir: str,
     validity_days: int,
     logger: logging.Logger,
+    csr_path: str | None = None,
 ) -> None:
-    """Issue an end-entity certificate signed by the given CA."""
+    """Issue an end-entity certificate signed by the given CA.
+
+    If *csr_path* is provided, the public key is extracted from the CSR
+    and no new key pair is generated (PKI-12).
+    """
+    from .csr import load_csr, verify_csr
+
     template = get_template(template_name)
 
     parsed_san = parse_san_strings(san_strings) if san_strings else ParsedSAN()
@@ -260,20 +267,43 @@ def issue_certificate(
     with open(ca_key_path, "rb") as f:
         ca_key = load_private_key(f.read(), ca_passphrase)
 
-    key_type = "rsa"
-    key_size = 2048
-    from cryptography.hazmat.primitives.asymmetric import ec as _ec
-    if isinstance(ca_key, _ec.EllipticCurvePrivateKey):
-        key_type = "ecc"
-        key_size = 256
+    ee_key = None
 
-    logger.info(
-        "Generating end-entity key pair (%s, %d bits)...",
-        key_type.upper(),
-        key_size,
-    )
-    ee_key = generate_key(key_type, key_size)
-    logger.info("End-entity key generation completed.")
+    if csr_path is not None:
+        logger.info("Loading external CSR from %s...", csr_path)
+        csr = load_csr(csr_path)
+        if not verify_csr(csr):
+            raise ValueError("CSR signature verification failed")
+        logger.info("CSR signature verified successfully.")
+
+        csr_bc = None
+        for ext in csr.extensions:
+            if isinstance(ext.value, x509.BasicConstraints):
+                csr_bc = ext.value
+                break
+        if csr_bc is not None and csr_bc.ca:
+            raise ValueError(
+                "CSR requests CA=TRUE but end-entity certificates must have CA=FALSE"
+            )
+
+        public_key = csr.public_key()
+        logger.info("Using public key from CSR (no new key pair generated).")
+    else:
+        key_type = "rsa"
+        key_size = 2048
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        if isinstance(ca_key, _ec.EllipticCurvePrivateKey):
+            key_type = "ecc"
+            key_size = 256
+
+        logger.info(
+            "Generating end-entity key pair (%s, %d bits)...",
+            key_type.upper(),
+            key_size,
+        )
+        ee_key = generate_key(key_type, key_size)
+        public_key = ee_key.public_key()
+        logger.info("End-entity key generation completed.")
 
     dn = parse_subject_dn(subject_str)
     subject_name = build_x509_name(dn)
@@ -284,7 +314,7 @@ def issue_certificate(
         subject_str,
     )
     cert = sign_end_entity_certificate(
-        public_key=ee_key.public_key(),
+        public_key=public_key,
         subject_name=subject_name,
         ca_key=ca_key,
         ca_cert=ca_cert,
@@ -309,12 +339,15 @@ def issue_certificate(
     save_certificate(serialize_certificate(cert), cert_path)
     logger.info("Certificate saved to %s", os.path.abspath(cert_path))
 
-    key_pem = serialize_private_key_unencrypted(ee_key)
-    key_path = os.path.join(out_dir, f"{base_name}.key.pem")
-    save_private_key(key_pem, key_path)
-    logger.warning(
-        "WARNING: End-entity private key saved UNENCRYPTED to %s",
-        os.path.abspath(key_path),
-    )
+    if ee_key is not None:
+        key_pem = serialize_private_key_unencrypted(ee_key)
+        key_path = os.path.join(out_dir, f"{base_name}.key.pem")
+        save_private_key(key_pem, key_path)
+        logger.warning(
+            "WARNING: End-entity private key saved UNENCRYPTED to %s",
+            os.path.abspath(key_path),
+        )
+    else:
+        logger.info("No private key stored (public key from external CSR).")
 
     logger.info("End-entity certificate issuance completed successfully.")

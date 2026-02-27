@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cert_parser.add_argument("--subject", required=True, help="Certificate Distinguished Name")
     cert_parser.add_argument("--san", action="append", default=[], help="SAN entry (e.g., dns:example.com). Repeatable.")
+    cert_parser.add_argument("--csr", default=None, help="Path to an externally generated CSR (PEM). If provided, no new key pair is generated.")
     cert_parser.add_argument("--out-dir", default="./pki/certs", help="Output directory (default: ./pki/certs)")
     cert_parser.add_argument("--validity-days", type=int, default=365, help="Validity period in days (default: 365)")
     cert_parser.add_argument("--log-file", default=None, help="Log file path")
@@ -177,6 +178,10 @@ def validate_issue_cert_args(args: argparse.Namespace) -> list[str]:
 
     if hasattr(args, "validity_days") and args.validity_days <= 0:
         errors.append("--validity-days must be a positive integer.")
+
+    csr_path = getattr(args, "csr", None)
+    if csr_path and not os.path.isfile(csr_path):
+        errors.append(f"--csr file does not exist: {csr_path}")
 
     return errors
 
@@ -325,6 +330,7 @@ def _handle_issue_cert(args: argparse.Namespace) -> int:
             out_dir=args.out_dir,
             validity_days=args.validity_days,
             logger=logger,
+            csr_path=getattr(args, "csr", None),
         )
     except Exception as exc:
         logger.error("Certificate issuance failed: %s", exc)

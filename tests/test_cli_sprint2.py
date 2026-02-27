@@ -1,10 +1,12 @@
-"""CLI tests for Sprint 2 subcommands (issue-intermediate, issue-cert, validate-chain)."""
+"""CLI tests for Sprint 2 subcommands (issue-intermediate, issue-cert, validate-chain, --csr)."""
 
 import os
 
 import pytest
 
 from micropki.cli import main
+from micropki.crypto_utils import generate_key
+from micropki.csr import generate_csr, serialize_csr
 
 
 @pytest.fixture()
@@ -200,5 +202,90 @@ class TestValidateChainCLI:
             "--cert", os.path.join(out_dir, "certs", "chain-test.example.com.cert.pem"),
             "--intermediate", os.path.join(out_dir, "certs", "intermediate.cert.pem"),
             "--root", os.path.join(other_dir, "certs", "ca.cert.pem"),
+        ])
+        assert rc != 0
+
+
+class TestIssueCertFromCSR:
+    """CLI-11 / PKI-12: Sign an externally generated CSR."""
+
+    def _write_csr(self, tmp_path, subject: str, is_ca: bool = False) -> str:
+        key = generate_key("rsa", 2048)
+        csr = generate_csr(key, subject, is_ca=is_ca)
+        csr_path = str(tmp_path / "external.csr.pem")
+        with open(csr_path, "wb") as f:
+            f.write(serialize_csr(csr))
+        return csr_path
+
+    def test_server_cert_from_csr(self, pki_with_intermediate, tmp_path):
+        out_dir, _, inter_pf = pki_with_intermediate
+        csr_path = self._write_csr(tmp_path, "/CN=csr.example.com")
+
+        rc = main([
+            "ca", "issue-cert",
+            "--ca-cert", os.path.join(out_dir, "certs", "intermediate.cert.pem"),
+            "--ca-key", os.path.join(out_dir, "private", "intermediate.key.pem"),
+            "--ca-pass-file", inter_pf,
+            "--template", "server",
+            "--subject", "CN=csr.example.com",
+            "--san", "dns:csr.example.com",
+            "--csr", csr_path,
+            "--out-dir", os.path.join(out_dir, "certs"),
+        ])
+        assert rc == 0
+        assert os.path.isfile(
+            os.path.join(out_dir, "certs", "csr.example.com.cert.pem")
+        )
+        assert not os.path.isfile(
+            os.path.join(out_dir, "certs", "csr.example.com.key.pem")
+        )
+
+    def test_client_cert_from_csr(self, pki_with_intermediate, tmp_path):
+        out_dir, _, inter_pf = pki_with_intermediate
+        csr_path = self._write_csr(tmp_path, "/CN=Alice")
+
+        rc = main([
+            "ca", "issue-cert",
+            "--ca-cert", os.path.join(out_dir, "certs", "intermediate.cert.pem"),
+            "--ca-key", os.path.join(out_dir, "private", "intermediate.key.pem"),
+            "--ca-pass-file", inter_pf,
+            "--template", "client",
+            "--subject", "CN=Alice",
+            "--san", "email:alice@example.com",
+            "--csr", csr_path,
+            "--out-dir", os.path.join(out_dir, "certs"),
+        ])
+        assert rc == 0
+
+    def test_csr_with_ca_true_rejected(self, pki_with_intermediate, tmp_path):
+        """CSR requesting CA=TRUE must be rejected for end-entity certs."""
+        out_dir, _, inter_pf = pki_with_intermediate
+        csr_path = self._write_csr(tmp_path, "/CN=Evil CA", is_ca=True)
+
+        rc = main([
+            "ca", "issue-cert",
+            "--ca-cert", os.path.join(out_dir, "certs", "intermediate.cert.pem"),
+            "--ca-key", os.path.join(out_dir, "private", "intermediate.key.pem"),
+            "--ca-pass-file", inter_pf,
+            "--template", "server",
+            "--subject", "CN=evil.example.com",
+            "--san", "dns:evil.example.com",
+            "--csr", csr_path,
+            "--out-dir", os.path.join(out_dir, "certs"),
+        ])
+        assert rc != 0
+
+    def test_nonexistent_csr_fails(self, pki_with_intermediate):
+        out_dir, _, inter_pf = pki_with_intermediate
+        rc = main([
+            "ca", "issue-cert",
+            "--ca-cert", os.path.join(out_dir, "certs", "intermediate.cert.pem"),
+            "--ca-key", os.path.join(out_dir, "private", "intermediate.key.pem"),
+            "--ca-pass-file", inter_pf,
+            "--template", "server",
+            "--subject", "CN=fail.com",
+            "--san", "dns:fail.com",
+            "--csr", "/nonexistent/path.csr.pem",
+            "--out-dir", os.path.join(out_dir, "certs"),
         ])
         assert rc != 0
