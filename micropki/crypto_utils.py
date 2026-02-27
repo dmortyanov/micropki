@@ -12,12 +12,18 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 
 
+_ECC_CURVES: dict[int, ec.EllipticCurve] = {
+    256: ec.SECP256R1(),
+    384: ec.SECP384R1(),
+}
+
+
 def generate_key(key_type: str, key_size: int) -> PrivateKeyTypes:
     """Generate an RSA or ECC private key.
 
     Args:
         key_type: ``'rsa'`` or ``'ecc'``.
-        key_size: 4096 for RSA, 384 for ECC (P-384).
+        key_size: RSA bit length (>= 2048) or ECC curve size (256 or 384).
 
     Returns:
         A private key object.
@@ -25,7 +31,10 @@ def generate_key(key_type: str, key_size: int) -> PrivateKeyTypes:
     if key_type == "rsa":
         return rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     elif key_type == "ecc":
-        return ec.generate_private_key(ec.SECP384R1())
+        curve = _ECC_CURVES.get(key_size)
+        if curve is None:
+            raise ValueError(f"Unsupported ECC curve size: {key_size}")
+        return ec.generate_private_key(curve)
     else:
         raise ValueError(f"Unsupported key type: {key_type}")
 
@@ -36,6 +45,15 @@ def serialize_private_key(key: PrivateKeyTypes, passphrase: bytes) -> bytes:
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+    )
+
+
+def serialize_private_key_unencrypted(key: PrivateKeyTypes) -> bytes:
+    """Serialize a private key to unencrypted PEM (PKCS#8)."""
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
     )
 
 
