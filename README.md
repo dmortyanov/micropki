@@ -22,6 +22,36 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Инициализация базы данных
+
+```bash
+# Инициализация схемы базы данных (создает pki/micropki.db)
+python -m micropki db init --db-path ./pki/micropki.db
+```
+
+## Запуск HTTP-сервера репозитория
+
+```bash
+# Запуск сервера (доступен на http://localhost:8080)
+python -m micropki repo serve --host 127.0.0.1 --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs
+```
+
+## Примеры запросов к API
+
+```bash
+# Получить сертификат по серийному номеру
+curl http://localhost:8080/certificate/2A7F1234567890ABCDEF --output cert.pem
+
+# Получить сертификат Root CA
+curl http://localhost:8080/ca/root --output root.pem
+
+# Получить сертификат Intermediate CA
+curl http://localhost:8080/ca/intermediate --output intermediate.pem
+
+# Попытка получить CRL (заглушка)
+curl http://localhost:8080/crl
+```
+
 ## Использование
 
 ### 1. Инициализация Root CA

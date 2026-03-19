@@ -13,6 +13,11 @@ import argparse
 import os
 import sys
 
+# Import database and repository modules for Sprint 3
+from .database import CertificateDatabase
+from .repository import RepositoryServer, RepositoryHandler
+from .serial import SerialNumberGenerator
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -21,8 +26,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # --- ca commands ---
     ca_parser = subparsers.add_parser("ca", help="Certificate Authority operations")
     ca_sub = ca_parser.add_subparsers(dest="ca_action", help="CA actions")
+
+    # --- db commands ---
+    db_parser = subparsers.add_parser("db", help="Database operations")
+    db_sub = db_parser.add_subparsers(dest="db_action", help="DB actions")
+
+    db_init_parser = db_sub.add_parser("init", help="Initialize the certificate database")
+    db_init_parser.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database file (default: ./pki/micropki.db)")
+    db_init_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
+
+    # --- repo commands ---
+    repo_parser = subparsers.add_parser("repo", help="Certificate repository server")
+    repo_sub = repo_parser.add_subparsers(dest="repo_action", help="Repository actions")
+
+    repo_serve_parser = repo_sub.add_parser("serve", help="Start the HTTP repository server")
+    repo_serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address for the server (default: 127.0.0.1)")
+    repo_serve_parser.add_argument("--port", type=int, default=8080, help="TCP port for the server (default: 8080)")
+    repo_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database (default: ./pki/micropki.db)")
+    repo_serve_parser.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates (default: ./pki/certs)")
+    repo_serve_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
 
     # --- ca init ---
     init_parser = ca_sub.add_parser("init", help="Initialise a self-signed Root CA")
@@ -215,6 +240,26 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_issue_cert(args)
         elif args.ca_action == "validate-chain":
             return _handle_validate_chain(args)
+        elif args.ca_action == "list-certs":
+            return _handle_list_certs(args)
+        elif args.ca_action == "show-cert":
+            return _handle_show_cert(args)
+
+    elif args.command == "db":
+        if not hasattr(args, "db_action") or args.db_action is None:
+            parser.parse_args(["db", "--help"])
+            return 1
+
+        if args.db_action == "init":
+            return _handle_db_init(args)
+
+    elif args.command == "repo":
+        if not hasattr(args, "repo_action") or args.repo_action is None:
+            parser.parse_args(["repo", "--help"])
+            return 1
+
+        if args.repo_action == "serve":
+            return _handle_repo_serve(args)
 
     return 0
 
@@ -222,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 def _handle_ca_init(args: argparse.Namespace) -> int:
     from .logger import setup_logging
     from .ca import init_root_ca
+    from .serial import SerialNumberGenerator
 
     logger = setup_logging(args.log_file)
 
@@ -248,6 +294,10 @@ def _handle_ca_init(args: argparse.Namespace) -> int:
 
     passphrase = read_passphrase(args.passphrase_file)
 
+    # Create a serial number generator (Sprint 3)
+    serial_gen = SerialNumberGenerator()
+    # The init_root_ca function will use this to generate a unique serial number
+
     try:
         init_root_ca(
             subject_str=args.subject,
@@ -257,6 +307,7 @@ def _handle_ca_init(args: argparse.Namespace) -> int:
             out_dir=out_dir,
             validity_days=args.validity_days,
             logger=logger,
+            serial_generator=serial_gen
         )
     except Exception as exc:
         logger.error("CA initialisation failed: %s", exc)
@@ -269,6 +320,7 @@ def _handle_ca_init(args: argparse.Namespace) -> int:
 def _handle_issue_intermediate(args: argparse.Namespace) -> int:
     from .logger import setup_logging
     from .ca import issue_intermediate_ca
+    from .serial import SerialNumberGenerator
 
     logger = setup_logging(getattr(args, "log_file", None))
 
@@ -281,6 +333,9 @@ def _handle_issue_intermediate(args: argparse.Namespace) -> int:
 
     root_passphrase = read_passphrase(args.root_pass_file)
     inter_passphrase = read_passphrase(args.passphrase_file)
+
+    # Create a serial number generator (Sprint 3)
+    serial_gen = SerialNumberGenerator()
 
     try:
         issue_intermediate_ca(
@@ -295,6 +350,7 @@ def _handle_issue_intermediate(args: argparse.Namespace) -> int:
             validity_days=args.validity_days,
             path_length=args.pathlen,
             logger=logger,
+            serial_generator=serial_gen
         )
     except Exception as exc:
         logger.error("Intermediate CA issuance failed: %s", exc)
@@ -307,6 +363,7 @@ def _handle_issue_intermediate(args: argparse.Namespace) -> int:
 def _handle_issue_cert(args: argparse.Namespace) -> int:
     from .logger import setup_logging
     from .ca import issue_certificate
+    from .serial import SerialNumberGenerator
 
     logger = setup_logging(getattr(args, "log_file", None))
 
@@ -318,6 +375,9 @@ def _handle_issue_cert(args: argparse.Namespace) -> int:
         return 1
 
     ca_passphrase = read_passphrase(args.ca_pass_file)
+
+    # Create a serial number generator (Sprint 3)
+    serial_gen = SerialNumberGenerator()
 
     try:
         issue_certificate(
@@ -331,6 +391,7 @@ def _handle_issue_cert(args: argparse.Namespace) -> int:
             validity_days=args.validity_days,
             logger=logger,
             csr_path=getattr(args, "csr", None),
+            serial_generator=serial_gen
         )
     except Exception as exc:
         logger.error("Certificate issuance failed: %s", exc)
