@@ -17,8 +17,8 @@ import sys
 from .database import CertificateDatabase
 from .repository import RepositoryServer, RepositoryHandler
 from .serial import SerialNumberGenerator
-
-
+from .config import Config
+from .config import Config
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="micropki",
