@@ -8,6 +8,7 @@ timestamp and CSPRNG to guarantee uniqueness across the PKI.
 import os
 import time
 import logging
+import sqlite3
 from typing import Optional
 
 # Initialize module logger
@@ -27,7 +28,46 @@ class SerialNumberGenerator:
         """
         self.db_path = db_path
         self._last_timestamp = 0
+        self._in_memory_counter = 0
         logger.info("Serial number generator initialized.")
+
+    def _next_counter(self) -> int:
+        """Return next persistent counter value (monotonic) or in-memory fallback."""
+        if not self.db_path:
+            self._in_memory_counter += 1
+            return self._in_memory_counter
+
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS serial_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        counter INTEGER NOT NULL
+                    )
+                    """
+                )
+                row = conn.execute(
+                    "SELECT counter FROM serial_state WHERE id = 1"
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO serial_state (id, counter) VALUES (1, 1)"
+                    )
+                    return 1
+
+                counter = int(row[0]) + 1
+                conn.execute(
+                    "UPDATE serial_state SET counter = ? WHERE id = 1", (counter,)
+                )
+                return counter
+        finally:
+            conn.close()
 
     def generate(self) -> int:
         """
@@ -40,28 +80,27 @@ class SerialNumberGenerator:
         Returns:
             A positive 64-bit integer suitable for use as an X.509 serial number.
         """
-        # Get current timestamp in seconds
         now = int(time.time())
 
-        # To prevent duplicates in the same second, ensure timestamp is non-decreasing
+        # Ensure non-decreasing timestamp to avoid duplicates on clock skew.
         if now < self._last_timestamp:
-            # System clock might have gone back, use last known time
             now = self._last_timestamp
-            logger.warning("System clock moved backwards. Using last timestamp to ensure serial uniqueness.")
+            logger.warning(
+                "System clock moved backwards. Using last timestamp to ensure serial uniqueness."
+            )
         else:
             self._last_timestamp = now
 
-        # Generate a 32-bit random number
-        rand_part = int.from_bytes(os.urandom(4), byteorder='big')
+        # 32 bits of CSPRNG randomness (>= 20 bits as required).
+        rand_part = int.from_bytes(os.urandom(4), byteorder="big")
 
-        # Combine into a 64-bit integer
-        serial = (now << 32) | rand_part
+        # Persistent monotonic counter stored in the DB (guarantees uniqueness across runs).
+        counter = self._next_counter()
 
-        # X.509 serial numbers must be positive and not zero
-        # The high bits (timestamp) will be non-zero for any time after 1970,
-        # so the entire number will be positive and non-zero.
+        # 64-bit serial: high 32 bits timestamp, low 32 bits random XOR counter.
+        serial = ((now & 0xFFFFFFFF) << 32) | ((rand_part ^ (counter & 0xFFFFFFFF)) & 0xFFFFFFFF)
+
         if serial == 0:
-            # Extremely unlikely, but correct it anyway
             serial = 1
             logger.critical("Generated serial number was zero, corrected to 1.")
 

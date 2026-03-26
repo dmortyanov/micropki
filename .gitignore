@@ -37,6 +37,7 @@ secrets/
 # Logs
 logs/
 *.log
+*.jsonl
 
 # OS files
 Thumbs.db
@@ -49,3 +50,9 @@ Desktop.ini
 
 
 applied_crypto_course/
+Sprint1_status.md
+Sprint2_status.md
+Sprint3_status.md
+sprint1_status.md
+sprint2_status.md
+sprint3_status.md

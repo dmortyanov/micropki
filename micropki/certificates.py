@@ -46,6 +46,7 @@ def create_self_signed_cert(
     private_key: PrivateKeyTypes,
     subject_str: str,
     validity_days: int,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """Create a self-signed Root CA certificate (X.509 v3).
 
@@ -71,12 +72,14 @@ def create_self_signed_cert(
     else:
         raise ValueError(f"Unsupported key type: {type(private_key)}")
 
+    serial_number = serial_number or x509.random_serial_number()
+
     builder = (
         x509.CertificateBuilder()
         .subject_name(name)
         .issuer_name(name)
         .public_key(public_key)
-        .serial_number(x509.random_serial_number())
+        .serial_number(serial_number)
         .not_valid_before(now)
         .not_valid_after(not_after)
         .add_extension(
@@ -140,6 +143,7 @@ def sign_intermediate_certificate(
     root_cert: x509.Certificate,
     validity_days: int,
     path_length: int = 0,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """Sign an Intermediate CA CSR with the Root CA.
 
@@ -159,12 +163,14 @@ def sign_intermediate_certificate(
         x509.SubjectKeyIdentifier
     )
 
+    serial_number = serial_number or x509.random_serial_number()
+
     builder = (
         x509.CertificateBuilder()
         .subject_name(csr.subject)
         .issuer_name(root_cert.subject)
         .public_key(public_key)
-        .serial_number(x509.random_serial_number())
+        .serial_number(serial_number)
         .not_valid_before(now)
         .not_valid_after(not_after)
         .add_extension(
@@ -205,6 +211,7 @@ def sign_end_entity_certificate(
     template: CertificateTemplate,
     parsed_san: ParsedSAN,
     validity_days: int,
+    serial_number: int | None = None,
 ) -> x509.Certificate:
     """Sign an end-entity certificate using the CA key.
 
@@ -221,12 +228,14 @@ def sign_end_entity_certificate(
     is_rsa = isinstance(public_key, rsa.RSAPublicKey)
     key_usage = build_key_usage(template, is_rsa)
 
+    serial_number = serial_number or x509.random_serial_number()
+
     builder = (
         x509.CertificateBuilder()
         .subject_name(subject_name)
         .issuer_name(ca_cert.subject)
         .public_key(public_key)
-        .serial_number(x509.random_serial_number())
+        .serial_number(serial_number)
         .not_valid_before(now)
         .not_valid_after(not_after)
         .add_extension(

@@ -11,6 +11,8 @@ import os
 import re
 import urllib.parse
 import logging
+import json
+import datetime as _dt
 from typing import Optional, Dict, Any
 from .database import CertificateDatabase
 
@@ -25,6 +27,7 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
         # Extract custom arguments
         self.db: Optional[CertificateDatabase] = kwargs.pop('db', None)
         self.cert_dir: str = kwargs.pop('cert_dir', '.')
+        self.audit_log_path: Optional[str] = kwargs.pop("audit_log_path", None)
         super().__init__(*args, **kwargs)
 
     def _send_response_no_cache(self, code: int, content_type: str = 'text/plain', content: bytes = b''):
@@ -37,6 +40,23 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
         self.end_headers()
+
+        # Sprint 3 LOG-8 (Could): structured JSON request log (one JSON per line).
+        if self.audit_log_path:
+            try:
+                record = {
+                    "ts": _dt.datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+                    "method": self.command,
+                    "path": self.path,
+                    "client_ip": self.client_address[0] if self.client_address else None,
+                    "status": code,
+                }
+                with open(self.audit_log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception:
+                # Logging must never break the server.
+                pass
+
         if content:
             self.wfile.write(content)
 
@@ -86,8 +106,9 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_response_no_cache(404, 'text/plain', b'CA level not found.')
                     return
 
-                # Construct filename
-                filename = f"{level}.cert.pem"
+                # Map CA level to certificate filename on disk.
+                # Root CA is stored as `ca.cert.pem` (project convention).
+                filename = "ca.cert.pem" if level == "root" else "intermediate.cert.pem"
                 cert_path = os.path.join(self.cert_dir, filename)
 
                 if not os.path.isfile(cert_path):
@@ -103,7 +124,7 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
 
             elif path == '/crl':
                 # Placeholder for Sprint 4
-                message = b'CRL generation not yet implemented.'
+                message = b'CRL generation not yet implemented'
                 self._send_response_no_cache(501, 'text/plain', message)
                 return
 
@@ -138,6 +159,32 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
             logger.exception("Unhandled exception in do_GET: %s", e)
             self._send_response_no_cache(500, 'text/plain', b'Internal Server Error')
 
+    def _method_not_allowed(self) -> None:
+        self._send_response_no_cache(
+            405,
+            'text/plain',
+            b'Method Not Allowed',
+        )
+
+    # Sprint 3: reject non-GET methods with 405.
+    def do_POST(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._method_not_allowed()
+
 
 class RepositoryServer:
     """A simple HTTP server for serving certificates."""
@@ -147,7 +194,8 @@ class RepositoryServer:
         host: str = "127.0.0.1",
         port: int = 8080,
         db_path: str = "./pki/micropki.db",
-        cert_dir: str = "./pki/certs"
+        cert_dir: str = "./pki/certs",
+        audit_log_path: Optional[str] = None,
     ):
         """
         Initialize the repository server.
@@ -162,6 +210,7 @@ class RepositoryServer:
         self.port = port
         self.db_path = db_path
         self.cert_dir = cert_dir
+        self.audit_log_path = audit_log_path
         self.db: Optional[CertificateDatabase] = None
         self.httpd: Optional[socketserver.TCPServer] = None
         logger.info(
@@ -191,7 +240,13 @@ class RepositoryServer:
             raise FileNotFoundError(f"Certificate directory not found: {self.cert_dir}")
 
         # Create the handler with custom arguments
-        handler = lambda *args, **kwargs: RepositoryHandler(*args, db=self.db, cert_dir=self.cert_dir, **kwargs)
+        handler = lambda *args, **kwargs: RepositoryHandler(
+            *args,
+            db=self.db,
+            cert_dir=self.cert_dir,
+            audit_log_path=self.audit_log_path,
+            **kwargs,
+        )
 
         # Create server
         try:

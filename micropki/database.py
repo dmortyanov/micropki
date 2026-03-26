@@ -40,7 +40,9 @@ class CertificateDatabase:
     def connect(self) -> None:
         """Establish a connection to the database."""
         try:
-            self._conn = sqlite3.connect(self.db_path)
+            # Repository server is started in a background thread in tests.
+            # Allow the same connection to be safely closed from a different thread.
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row  # Enable dict-like access
             logger.info("Connected to database: %s", self.db_path)
         except sqlite3.Error as e:
@@ -60,19 +62,19 @@ class CertificateDatabase:
             raise RuntimeError("Database not connected. Call connect() first.")
 
         create_table_sql = '''
-        CREATE TABLE IF NOT EXISTS certificates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            serial_hex TEXT UNIQUE NOT NULL,
-            subject TEXT NOT NULL,
-            issuer TEXT NOT NULL,
-            not_before TEXT NOT NULL,
-            not_after TEXT NOT NULL,
-            cert_pem TEXT NOT NULL,
-            status TEXT NOT NULL,
-            revocation_reason TEXT,
-            revocation_date TEXT,
-            created_at TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS certificates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                serial_hex TEXT UNIQUE NOT NULL,
+                subject TEXT NOT NULL,
+                issuer TEXT NOT NULL,
+                not_before TEXT NOT NULL,
+                not_after TEXT NOT NULL,
+                cert_pem TEXT NOT NULL,
+                status TEXT NOT NULL,
+                revocation_reason TEXT,
+                revocation_date TEXT,
+                created_at TEXT NOT NULL
+            );
         '''
 
         index_serial_sql = 'CREATE INDEX IF NOT EXISTS idx_serial_hex ON certificates(serial_hex);'
@@ -81,8 +83,37 @@ class CertificateDatabase:
         try:
             with self._conn:
                 self._conn.execute(create_table_sql)
+
+                # PKI-16: minimal schema migration support.
+                # If columns were missing in an older schema, add them automatically.
+                user_version_row = self._conn.execute("PRAGMA user_version").fetchone()
+                user_version = int(user_version_row[0]) if user_version_row else 0
+                target_version = 1
+
+                if user_version != target_version:
+                    existing_cols = {
+                        r["name"]
+                        for r in self._conn.execute("PRAGMA table_info(certificates)").fetchall()
+                    }
+
+                    if "revocation_reason" not in existing_cols:
+                        self._conn.execute(
+                            "ALTER TABLE certificates ADD COLUMN revocation_reason TEXT"
+                        )
+                    if "revocation_date" not in existing_cols:
+                        self._conn.execute(
+                            "ALTER TABLE certificates ADD COLUMN revocation_date TEXT"
+                        )
+                    if "created_at" not in existing_cols:
+                        self._conn.execute(
+                            "ALTER TABLE certificates ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
+                        )
+
+                    self._conn.execute(f"PRAGMA user_version = {target_version}")
+
                 self._conn.execute(index_serial_sql)
                 self._conn.execute(index_status_sql)
+
                 logger.info("Database schema initialized successfully.")
         except sqlite3.Error as e:
             logger.error("Failed to initialize database schema: %s", e)

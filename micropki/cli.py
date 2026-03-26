@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     repo_serve_parser.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates (default: ./pki/certs)")
     repo_serve_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
 
+    # --- repo status ---
+    repo_status_parser = repo_sub.add_parser("status", help="Check whether the repository server is reachable")
+    repo_status_parser.add_argument("--host", default="127.0.0.1", help="Host to check (default: 127.0.0.1)")
+    repo_status_parser.add_argument("--port", type=int, default=8080, help="TCP port to check (default: 8080)")
+
     # --- ca init ---
     init_parser = ca_sub.add_parser("init", help="Initialise a self-signed Root CA")
     init_parser.add_argument(
@@ -129,6 +134,37 @@ def build_parser() -> argparse.ArgumentParser:
     val_parser.add_argument("--intermediate", required=True, help="Intermediate CA certificate (PEM)")
     val_parser.add_argument("--root", required=True, help="Root CA certificate (PEM)")
     val_parser.add_argument("--log-file", default=None, help="Log file path")
+
+    # --- ca list-certs ---
+    list_parser = ca_sub.add_parser(
+        "list-certs",
+        help="List issued certificates from the database",
+    )
+    list_parser.add_argument(
+        "--status",
+        choices=["valid", "revoked", "expired"],
+        default=None,
+        help="Filter by certificate status",
+    )
+    list_parser.add_argument(
+        "--format",
+        choices=["table", "json", "csv"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
+    # --- ca show-cert ---
+    show_parser = ca_sub.add_parser(
+        "show-cert",
+        help="Fetch a certificate by serial number and print PEM",
+    )
+    show_parser.add_argument("serial", help="Certificate serial number in hex")
+    show_parser.add_argument(
+        "--format",
+        choices=["pem"],
+        default="pem",
+        help="Output format (default: pem)",
+    )
 
     return parser
 
@@ -260,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.repo_action == "serve":
             return _handle_repo_serve(args)
+        elif args.repo_action == "status":
+            return _handle_repo_status(args)
 
     return 0
 
@@ -295,8 +333,9 @@ def _handle_ca_init(args: argparse.Namespace) -> int:
     passphrase = read_passphrase(args.passphrase_file)
 
     # Create a serial number generator (Sprint 3)
-    serial_gen = SerialNumberGenerator()
-    # The init_root_ca function will use this to generate a unique serial number
+    # Use a persistent counter stored in the DB to guarantee uniqueness across runs.
+    db_path = os.path.join(out_dir, "micropki.db")
+    serial_gen = SerialNumberGenerator(db_path=db_path)
 
     try:
         init_root_ca(
@@ -334,8 +373,9 @@ def _handle_issue_intermediate(args: argparse.Namespace) -> int:
     root_passphrase = read_passphrase(args.root_pass_file)
     inter_passphrase = read_passphrase(args.passphrase_file)
 
-    # Create a serial number generator (Sprint 3)
-    serial_gen = SerialNumberGenerator()
+    # Persistent serial generator (Sprint 3)
+    db_path = os.path.join(args.out_dir, "micropki.db")
+    serial_gen = SerialNumberGenerator(db_path=db_path)
 
     try:
         issue_intermediate_ca(
@@ -376,8 +416,11 @@ def _handle_issue_cert(args: argparse.Namespace) -> int:
 
     ca_passphrase = read_passphrase(args.ca_pass_file)
 
-    # Create a serial number generator (Sprint 3)
-    serial_gen = SerialNumberGenerator()
+    # Persistent serial generator (Sprint 3)
+    # Leaf certificates are written to .../certs, while DB is in the parent folder.
+    db_root = os.path.dirname(args.out_dir) if args.out_dir else "./pki"
+    db_path = os.path.join(db_root, "micropki.db")
+    serial_gen = SerialNumberGenerator(db_path=db_path)
 
     try:
         issue_certificate(
@@ -428,6 +471,145 @@ def _handle_validate_chain(args: argparse.Namespace) -> int:
     logger.info(msg)
     print(msg)
     return 0
+
+
+def _get_default_db_path() -> str:
+    """Default DB path for Sprint 3 certificate repository commands."""
+    cfg = Config()
+    return cfg.get("database.path", "./pki/micropki.db")
+
+
+def _handle_db_init(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .database import CertificateDatabase
+
+    logger = setup_logging(args.log_file)
+
+    try:
+        db = CertificateDatabase(args.db_path)
+        db.connect()
+        db.init_schema()
+        db.close()
+        logger.info("Database initialized: %s", args.db_path)
+        return 0
+    except Exception as exc:
+        logger.error("Database initialization failed: %s", exc)
+        print(f"Error: Database initialization failed.", file=sys.stderr)
+        return 1
+
+
+def _handle_list_certs(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+
+    try:
+        records = db.list_certificates(status=args.status)
+        if args.format == "json":
+            import json
+
+            print(json.dumps(records, ensure_ascii=False, indent=2))
+        elif args.format == "csv":
+            import csv
+            import sys as _sys
+
+            writer = csv.writer(_sys.stdout)
+            writer.writerow(
+                ["serial_hex", "subject", "issuer", "not_before", "not_after", "status"]
+            )
+            for r in records:
+                writer.writerow(
+                    [
+                        r.get("serial_hex"),
+                        r.get("subject"),
+                        r.get("issuer"),
+                        r.get("not_before"),
+                        r.get("not_after"),
+                        r.get("status"),
+                    ]
+                )
+        else:
+            # table (default)
+            headers = ["serial_hex", "subject", "not_after", "status"]
+            print(" | ".join(headers))
+            print("-" * 90)
+            for r in records:
+                row = [
+                    str(r.get("serial_hex", "")),
+                    str(r.get("subject", "")),
+                    str(r.get("not_after", "")),
+                    str(r.get("status", "")),
+                ]
+                print(" | ".join(row))
+        return 0
+    finally:
+        db.close()
+
+
+def _handle_show_cert(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+
+    try:
+        serial_hex = args.serial
+        if not isinstance(serial_hex, str) or not serial_hex.strip():
+            print("Error: serial must be provided.", file=sys.stderr)
+            return 1
+
+        if not all(c in "0123456789abcdefABCDEF" for c in serial_hex):
+            print("Error: serial must be a hex string.", file=sys.stderr)
+            return 1
+
+        record = db.get_certificate_by_serial(serial_hex)
+        if not record:
+            print("Error: certificate not found.", file=sys.stderr)
+            return 1
+
+        # Sprint 3: print PEM content to stdout.
+        print(record["cert_pem"])
+        return 0
+    finally:
+        db.close()
+
+
+def _handle_repo_serve(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .repository import RepositoryServer
+
+    logger = setup_logging(args.log_file)
+    try:
+        audit_log_path = f"{args.log_file}.jsonl" if getattr(args, "log_file", None) else None
+        server = RepositoryServer(
+            host=args.host,
+            port=args.port,
+            db_path=args.db_path,
+            cert_dir=args.cert_dir,
+            audit_log_path=audit_log_path,
+        )
+        server.start()
+        return 0
+    except KeyboardInterrupt:
+        logger.info("Repository server stopped (KeyboardInterrupt).")
+        return 0
+
+
+def _handle_repo_status(args: argparse.Namespace) -> int:
+    import socket
+
+    try:
+        with socket.create_connection((args.host, args.port), timeout=1):
+            print(f"Repository is running at {args.host}:{args.port}")
+            return 0
+    except OSError:
+        print(f"Repository is NOT running at {args.host}:{args.port}")
+        return 1
 
 
 if __name__ == "__main__":

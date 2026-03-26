@@ -37,6 +37,14 @@ from .templates import (
 )
 
 
+def _derive_db_path(out_dir: str) -> str:
+    """Derive default DB path from output directory."""
+    base_dir = out_dir
+    if os.path.basename(os.path.normpath(out_dir)) == "certs":
+        base_dir = os.path.dirname(out_dir)
+    return os.path.join(base_dir, "micropki.db")
+
+
 def init_root_ca(
     subject_str: str,
     key_type: str,
@@ -45,6 +53,7 @@ def init_root_ca(
     out_dir: str,
     validity_days: int,
     logger: logging.Logger,
+    serial_generator=None,
 ) -> None:
     """Create a self-signed Root CA: key pair, certificate, policy file.
 
@@ -66,7 +75,13 @@ def init_root_ca(
     logger.info("Key generation completed successfully.")
 
     logger.info("Starting certificate signing (self-signed Root CA)...")
-    cert = create_self_signed_cert(private_key, subject_str, validity_days)
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    cert = create_self_signed_cert(
+        private_key,
+        subject_str,
+        validity_days,
+        serial_number=serial_number,
+    )
     logger.info("Certificate signing completed successfully.")
 
     key_pem = serialize_private_key(private_key, passphrase)
@@ -134,6 +149,7 @@ def issue_intermediate_ca(
     validity_days: int,
     path_length: int,
     logger: logging.Logger,
+    serial_generator=None,
 ) -> None:
     """Generate an Intermediate CA signed by the Root CA."""
     root_cert = load_certificate(root_cert_path)
@@ -163,20 +179,57 @@ def issue_intermediate_ca(
     logger.info("CSR saved to %s", os.path.abspath(csr_path))
 
     logger.info("Root CA signing Intermediate CA certificate...")
+    serial_number = serial_generator.generate() if serial_generator is not None else None
     inter_cert = sign_intermediate_certificate(
-        csr, root_key, root_cert, validity_days, path_length
+        csr,
+        root_key,
+        root_cert,
+        validity_days,
+        path_length,
+        serial_number=serial_number,
     )
     logger.info(
         "Intermediate CA certificate signed. Serial: %s",
         format(inter_cert.serial_number, "X"),
     )
 
+    # Sprint 3: store issued certificate in DB before writing any certificate/key files.
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(inter_cert.serial_number, "X")
+    subject_dn = inter_cert.subject.rfc4514_string()
+    issuer_dn = inter_cert.issuer.rfc4514_string()
+    not_before = inter_cert.not_valid_before_utc.isoformat()
+    not_after = inter_cert.not_valid_after_utc.isoformat()
+    cert_pem_bytes = serialize_certificate(inter_cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
+    try:
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before,
+            not_after=not_after,
+            cert_pem=cert_pem_text,
+            status="valid",
+        )
+    except Exception as exc:
+        logger.error("DB insertion failed for intermediate cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
+
     key_pem = serialize_private_key(inter_key, passphrase)
     key_path = os.path.join(out_dir, "private", "intermediate.key.pem")
     save_private_key(key_pem, key_path)
     logger.info("Intermediate CA private key saved to %s", os.path.abspath(key_path))
 
-    cert_pem = serialize_certificate(inter_cert)
+    cert_pem = cert_pem_bytes
     cert_path = os.path.join(out_dir, "certs", "intermediate.cert.pem")
     save_certificate(cert_pem, cert_path)
     logger.info(
@@ -246,6 +299,7 @@ def issue_certificate(
     validity_days: int,
     logger: logging.Logger,
     csr_path: str | None = None,
+    serial_generator=None,
 ) -> None:
     """Issue an end-entity certificate signed by the given CA.
 
@@ -313,6 +367,7 @@ def issue_certificate(
         template_name,
         subject_str,
     )
+    serial_number = serial_generator.generate() if serial_generator is not None else None
     cert = sign_end_entity_certificate(
         public_key=public_key,
         subject_name=subject_name,
@@ -321,6 +376,7 @@ def issue_certificate(
         template=template,
         parsed_san=parsed_san,
         validity_days=validity_days,
+        serial_number=serial_number,
     )
 
     san_desc = ", ".join(san_strings) if san_strings else "none"
@@ -332,11 +388,43 @@ def issue_certificate(
         san_desc,
     )
 
+    # Sprint 3: store issued certificate in DB before writing any files.
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(cert.serial_number, "X")
+    subject_dn = cert.subject.rfc4514_string()
+    issuer_dn = cert.issuer.rfc4514_string()
+    not_before = cert.not_valid_before_utc.isoformat()
+    not_after = cert.not_valid_after_utc.isoformat()
+
+    cert_pem_bytes = serialize_certificate(cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
+    try:
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before,
+            not_after=not_after,
+            cert_pem=cert_pem_text,
+            status="valid",
+        )
+    except Exception as exc:
+        logger.error("DB insertion failed for cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
+
     base_name = _safe_filename(subject_str)
     os.makedirs(out_dir, exist_ok=True)
 
     cert_path = os.path.join(out_dir, f"{base_name}.cert.pem")
-    save_certificate(serialize_certificate(cert), cert_path)
+    save_certificate(cert_pem_bytes, cert_path)
     logger.info("Certificate saved to %s", os.path.abspath(cert_path))
 
     if ee_key is not None:

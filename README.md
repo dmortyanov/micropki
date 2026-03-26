@@ -52,6 +52,22 @@ curl http://localhost:8080/ca/intermediate --output intermediate.pem
 curl http://localhost:8080/crl
 ```
 
+## Команды CLI для работы с базой/сертификатами (Sprint 3)
+
+```bash
+# Инициализировать схему БД (SQLite)
+python -m micropki db init --db-path ./pki/micropki.db
+
+# Список сертификатов
+python -m micropki ca list-certs --status valid --format table
+
+# Показать сертификат по serial (выведет PEM в stdout)
+python -m micropki ca show-cert 2A7F1234567890ABCDEF
+
+# Проверить, доступен ли HTTP-репозиторий
+python -m micropki repo status --host 127.0.0.1 --port 8080
+```
+
 ## Использование
 
 ### 1. Инициализация Root CA
