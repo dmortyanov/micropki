@@ -48,8 +48,24 @@ curl http://localhost:8080/ca/root --output root.pem
 # Получить сертификат Intermediate CA
 curl http://localhost:8080/ca/intermediate --output intermediate.pem
 
-# Попытка получить CRL (заглушка)
-curl http://localhost:8080/crl
+# Получить CRL для Intermediate CA (Sprint 4)
+curl http://localhost:8080/crl/intermediate.crl --output intermediate.crl.pem
+
+# Получить дефолтный CRL
+curl http://localhost:8080/crl --output default.crl.pem
+```
+
+## Команды отзыва и CRL (Sprint 4)
+
+```bash
+# Отозвать сертификат
+python -m micropki ca revoke 2A7F1234567890ABCDEF --reason keycompromise
+
+# Проверить статус сертификата в базе
+python -m micropki ca check-revoked 2A7F1234567890ABCDEF
+
+# Сгенерировать CRL (Certificate Revocation List)
+python -m micropki ca gen-crl --ca intermediate --next-update 7 --out-dir ./pki
 ```
 
 ## Команды CLI для работы с базой/сертификатами (Sprint 3)
@@ -167,6 +183,8 @@ pki/
 │   └── example.com.key.pem      # Приватный ключ (незашифрованный)
 ├── csrs/
 │   └── intermediate.csr.pem     # CSR Intermediate CA
+├── crl/
+│   └── intermediate.crl.pem     # Открытый список отозванных сертификатов (CRL)
 └── policy.txt                   # Документ политики сертификации
 ```
 

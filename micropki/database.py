@@ -77,20 +77,33 @@ class CertificateDatabase:
             );
         '''
 
+        create_crl_metadata_sql = '''
+            CREATE TABLE IF NOT EXISTS crl_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ca_subject TEXT NOT NULL UNIQUE,
+                crl_number INTEGER NOT NULL,
+                last_generated TEXT NOT NULL,
+                next_update TEXT NOT NULL,
+                crl_path TEXT NOT NULL
+            );
+        '''
+
         index_serial_sql = 'CREATE INDEX IF NOT EXISTS idx_serial_hex ON certificates(serial_hex);'
         index_status_sql = 'CREATE INDEX IF NOT EXISTS idx_status ON certificates(status);'
+        index_ca_subject_sql = 'CREATE INDEX IF NOT EXISTS idx_ca_subject ON crl_metadata(ca_subject);'
 
         try:
             with self._conn:
                 self._conn.execute(create_table_sql)
+                self._conn.execute(create_crl_metadata_sql)
 
-                # PKI-16: minimal schema migration support.
-                # If columns were missing in an older schema, add them automatically.
+                # PKI-16 & DB-7: minimal schema migration support.
+                # If columns or tables were missing in an older schema, add them automatically.
                 user_version_row = self._conn.execute("PRAGMA user_version").fetchone()
                 user_version = int(user_version_row[0]) if user_version_row else 0
-                target_version = 1
+                target_version = 2
 
-                if user_version != target_version:
+                if user_version < 1:
                     existing_cols = {
                         r["name"]
                         for r in self._conn.execute("PRAGMA table_info(certificates)").fetchall()
@@ -109,10 +122,16 @@ class CertificateDatabase:
                             "ALTER TABLE certificates ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"
                         )
 
+                if user_version < 2:
+                    # Target version 2 adds the crl_metadata table, which is created by CREATE TABLE IF NOT EXISTS above.
+                    pass
+
+                if user_version != target_version:
                     self._conn.execute(f"PRAGMA user_version = {target_version}")
 
                 self._conn.execute(index_serial_sql)
                 self._conn.execute(index_status_sql)
+                self._conn.execute(index_ca_subject_sql)
 
                 logger.info("Database schema initialized successfully.")
         except sqlite3.Error as e:
@@ -245,7 +264,7 @@ class CertificateDatabase:
         serial_hex: str,
         status: str,
         revocation_reason: Optional[str] = None
-    ) -> None:
+    ) -> bool:
         """
         Update the status of a certificate (e.g., revoke it).
 
@@ -253,10 +272,15 @@ class CertificateDatabase:
             serial_hex: Serial number in hexadecimal string.
             status: New status (e.g., 'revoked').
             revocation_reason: Reason for revocation (optional).
+            
+        Returns:
+            True if the status was successfully updated, False if the certificate was already in the requested status.
         """
         if not self._conn:
             raise RuntimeError("Database not connected. Call connect() first.")
 
+        select_sql = 'SELECT status FROM certificates WHERE UPPER(serial_hex) = UPPER(?)'
+        
         update_sql = '''
         UPDATE certificates SET status = ?, revocation_date = ?, revocation_reason = ?
         WHERE UPPER(serial_hex) = UPPER(?)
@@ -265,13 +289,63 @@ class CertificateDatabase:
 
         try:
             with self._conn:
-                cursor = self._conn.execute(update_sql, (status, now, revocation_reason, serial_hex))
-                if cursor.rowcount == 0:
+                cursor = self._conn.execute(select_sql, (serial_hex,))
+                row = cursor.fetchone()
+                if not row:
                     logger.warning("No certificate found for revocation with serial: %s", serial_hex)
                     raise ValueError(f"No certificate found with serial {serial_hex}")
+                
+                if row["status"] == status:
+                    return False
+                    
+                cursor = self._conn.execute(update_sql, (status, now, revocation_reason, serial_hex))
                 logger.info("Certificate status updated: serial=%s, status=%s", serial_hex, status)
+                return True
         except sqlite3.Error as e:
             logger.error("Failed to update certificate status for serial %s: %s", serial_hex, e)
+            raise
+            
+    def get_crl_metadata(self, ca_subject: str) -> Optional[Dict[str, Any]]:
+        """Retrieve CRL metadata for a specific CA."""
+        if not self._conn:
+            raise RuntimeError("Database not connected")
+            
+        sql = 'SELECT * FROM crl_metadata WHERE ca_subject = ?'
+        try:
+            cursor = self._conn.execute(sql, (ca_subject,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except sqlite3.Error as e:
+            logger.error("Failed to get crl metadata for %s: %s", ca_subject, e)
+            raise
+            
+    def upsert_crl_metadata(
+        self,
+        ca_subject: str,
+        crl_number: int,
+        last_generated: str,
+        next_update: str,
+        crl_path: str
+    ) -> None:
+        """Insert or update CRL metadata for a specific CA."""
+        if not self._conn:
+            raise RuntimeError("Database not connected")
+            
+        sql = '''
+            INSERT INTO crl_metadata (ca_subject, crl_number, last_generated, next_update, crl_path)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(ca_subject) DO UPDATE SET
+                crl_number=excluded.crl_number,
+                last_generated=excluded.last_generated,
+                next_update=excluded.next_update,
+                crl_path=excluded.crl_path
+        '''
+        try:
+            with self._conn:
+                self._conn.execute(sql, (ca_subject, crl_number, last_generated, next_update, crl_path))
+                logger.info("Upserted crl_metadata for %s (CRL #%d)", ca_subject, crl_number)
+        except sqlite3.Error as e:
+            logger.error("Failed to upsert crl metadata for %s: %s", ca_subject, e)
             raise
 
     def get_revoked_certificates(self) -> List[Dict[str, Any]]:

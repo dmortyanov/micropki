@@ -122,10 +122,75 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_response_no_cache(200, 'application/x-pem-file', cert_pem)
                 return
 
-            elif path == '/crl':
-                # Placeholder for Sprint 4
-                message = b'CRL generation not yet implemented'
-                self._send_response_no_cache(501, 'text/plain', message)
+            elif path == '/crl' or path.startswith('/crl/'):
+                ca_hint = "intermediate"
+                qs = urllib.parse.parse_qs(parsed_path.query)
+                if "ca" in qs:
+                    ca_hint = qs["ca"][0]
+                elif path.startswith('/crl/') and path.endswith('.crl'):
+                    ca_hint = path[len('/crl/'):-len('.crl')]
+
+                if ca_hint not in ["root", "intermediate"]:
+                    self._send_response_no_cache(404, 'text/plain', b'CA level not found.')
+                    return
+
+                # Assuming crl directory is alongside certs
+                out_dir = os.path.dirname(os.path.abspath(self.cert_dir))
+                crl_path = os.path.join(out_dir, "crl", f"{ca_hint}.crl.pem")
+
+                if not os.path.isfile(crl_path):
+                    self._send_response_no_cache(404, 'text/plain', b'CRL not found on disk.')
+                    return
+
+                with open(crl_path, "rb") as f:
+                    crl_pem = f.read()
+
+                max_age = 0
+                try:
+                    from cryptography import x509
+                    crl_obj = x509.load_pem_x509_crl(crl_pem)
+                    
+                    if hasattr(crl_obj, 'next_update_utc'):
+                        next_upd = crl_obj.next_update_utc
+                    else:
+                        next_upd = crl_obj.next_update
+                        if next_upd and next_upd.tzinfo is None:
+                            next_upd = next_upd.replace(tzinfo=_dt.timezone.utc)
+                            
+                    if next_upd:
+                        now = _dt.datetime.now(_dt.timezone.utc)
+                        delta = next_upd - now
+                        max_age = max(0, int(delta.total_seconds()))
+                except Exception as e:
+                    logger.warning("Failed to parse CRL for caching headers: %s", e)
+
+                stat = os.stat(crl_path)
+                last_mod_header = self.date_time_string(int(stat.st_mtime))
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pkix-crl')
+                self.send_header('Content-Length', str(len(crl_pem)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Cache-Control', f'max-age={max_age}')
+                self.send_header('Last-Modified', last_mod_header)
+                self.send_header('ETag', f'"{stat.st_size}-{stat.st_mtime}"')
+                self.end_headers()
+
+                if self.audit_log_path:
+                    try:
+                        record = {
+                            "ts": _dt.datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
+                            "method": self.command,
+                            "path": self.path,
+                            "client_ip": self.client_address[0] if self.client_address else None,
+                            "status": 200,
+                        }
+                        with open(self.audit_log_path, "a", encoding="utf-8") as rf:
+                            rf.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
+
+                self.wfile.write(crl_pem)
                 return
 
             else:

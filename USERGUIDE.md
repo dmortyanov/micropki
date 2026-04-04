@@ -233,9 +233,9 @@ curl http://127.0.0.1:8080/ca/root --output root.pem
 curl http://127.0.0.1:8080/ca/intermediate --output intermediate.pem
 ```
 
-### GET /crl (заглушка Sprint 4)
+### GET /crl и /crl/<ca>.crl (Sprint 4)
 ```bash
-curl http://127.0.0.1:8080/crl
+curl http://127.0.0.1:8080/crl/intermediate.crl --output crl.pem
 ```
 
 ---
@@ -276,7 +276,8 @@ Endpoints:
 - `GET /certificate/<serial>` — PEM сертификат по serial (hex, case-insensitive)
 - `GET /ca/root` — Root CA certificate PEM
 - `GET /ca/intermediate` — Intermediate CA certificate PEM
-- `GET /crl` — заглушка для Sprint 4 (в ответе `501`)
+- `GET /crl` — Default CRL
+- `GET /crl/<ca>.crl` — Специфичный CRL для CA
 
 Примеры `curl`:
 ```bash
@@ -289,8 +290,8 @@ curl http://127.0.0.1:8080/ca/root --output root.pem
 # Intermediate CA
 curl http://127.0.0.1:8080/ca/intermediate --output intermediate.pem
 
-# CRL (заглушка)
-curl http://127.0.0.1:8080/crl
+# CRL (Sprint 4)
+curl http://127.0.0.1:8080/crl/intermediate.crl
 ```
 
 ## DB: инициализация SQLite
@@ -931,7 +932,8 @@ python -m micropki repo serve --host 0.0.0.0 --port 8443 --db-path ./pki/micropk
 - `GET /certificate/<serial>` — Возвращает сертификат по его серийному номеру.
 - `GET /ca/root` — Возвращает корневой сертификат.
 - `GET /ca/intermediate` — Возвращает сертификат промежуточного УЦ.
-- `GET /crl` — Заглушка для Sprint 3. Возвращает `501 Not Implemented`.
+- `GET /crl` — Возвращает дефолтный CRL.
+- `GET /crl/<ca>.crl` — Возвращает CRL для указанного CA.
 
 **Примеры запросов:**
 
@@ -944,6 +946,58 @@ curl http://localhost:8080/ca/root --output root.pem
 
 # Получить промежуточный сертификат
 curl http://localhost:8080/ca/intermediate --output intermediate.pem
+```
+
+---
+
+### 3.8. Sprint 4: Отзыв сертификатов и CRL
+
+#### Отзыв сертификата
+
+Ограничивает действие ранее выданного сертификата и обновляет его статус в БД.
+
+**Команда:** `ca revoke`
+
+**Параметры:**
+
+| Параметр             | Описание                                  | Обязательный | По умолчанию |
+|----------------------|-------------------------------------------|--------------|--------------|
+| `<serial>`           | Серийный номер сертификата в hex          | Да           | —            |
+| `--reason`           | Причина отзыва (например, `keycompromise`)| Нет          | `unspecified`|
+| `--force`            | Убрать подтверждение ввода (y/N)         | Нет          | `false`      |
+
+**Пример:**
+
+```bash
+python -m micropki ca revoke 2A7F1234567890ABCDEF --reason keycompromise --force
+```
+
+#### Проверка статуса отзыва
+
+**Команда:** `ca check-revoked`
+
+**Пример:**
+
+```bash
+python -m micropki ca check-revoked 2A7F1234567890ABCDEF
+```
+
+#### Генерация списка отзыва (CRL)
+
+**Команда:** `ca gen-crl`
+
+**Параметры:**
+
+| Параметр             | Описание                                  | Обязательный | По умолчанию |
+|----------------------|-------------------------------------------|--------------|--------------|
+| `--ca`               | Уровень (`root`, `intermediate`, путь)    | Да           | —            |
+| `--next-update`      | Число дней до следующего обновления       | Нет          | 7            |
+| `--out-dir`          | Базовая директория PKI                    | Нет          | `./pki`      |
+
+**Пример:**
+
+```bash
+python -m micropki ca gen-crl --ca intermediate --next-update 14
 ```
 
 ---

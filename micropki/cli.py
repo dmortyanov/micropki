@@ -166,6 +166,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format (default: pem)",
     )
 
+    # --- ca revoke ---
+    revoke_parser = ca_sub.add_parser("revoke", help="Revoke a certificate")
+    revoke_parser.add_argument("serial", help="Certificate serial number in hex")
+    revoke_parser.add_argument("--reason", default="unspecified", help="Revocation reason code (default: unspecified)")
+    revoke_parser.add_argument("--crl", help="Path to CRL file to update (optional)")
+    revoke_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+
+    # --- ca gen-crl ---
+    gen_crl_parser = ca_sub.add_parser("gen-crl", help="Generate or regenerate a CRL")
+    gen_crl_parser.add_argument("--ca", required=True, help="'root', 'intermediate', or path to CA cert")
+    gen_crl_parser.add_argument("--next-update", type=int, default=7, help="Days until next CRL update (default: 7)")
+    gen_crl_parser.add_argument("--out-file", help="Output file path (default: <out-dir>/crl/<ca>.crl.pem)")
+    gen_crl_parser.add_argument("--out-dir", default="./pki", help="PKI base directory (default: ./pki)")
+    gen_crl_parser.add_argument("--ca-pass-file", help="Passphrase file for CA key (overrides defaults)")
+
+    # --- ca check-revoked ---
+    check_parser = ca_sub.add_parser("check-revoked", help="Check revocation status of a certificate")
+    check_parser.add_argument("serial", help="Certificate serial number in hex")
+
     return parser
 
 
@@ -280,6 +299,12 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_list_certs(args)
         elif args.ca_action == "show-cert":
             return _handle_show_cert(args)
+        elif args.ca_action == "revoke":
+            return _handle_ca_revoke(args)
+        elif args.ca_action == "gen-crl":
+            return _handle_ca_gen_crl(args)
+        elif args.ca_action == "check-revoked":
+            return _handle_ca_check_revoked(args)
 
     elif args.command == "db":
         if not hasattr(args, "db_action") or args.db_action is None:
@@ -611,6 +636,126 @@ def _handle_repo_status(args: argparse.Namespace) -> int:
         print(f"Repository is NOT running at {args.host}:{args.port}")
         return 1
 
+
+def _handle_ca_revoke(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+    from .revocation import revoke_certificate
+
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+
+    try:
+        if not args.force:
+            ans = input(f"Are you sure you want to revoke certificate {args.serial}? [y/N]: ")
+            if ans.lower() != 'y':
+                print("Operation cancelled.")
+                return 0
+                
+        revoked = revoke_certificate(db, args.serial, args.reason)
+        if revoked:
+            print(f"Successfully revoked {args.serial} with reason '{args.reason}'.")
+        else:
+            print(f"Warning: {args.serial} is already revoked. No changes made.")
+            
+        # Technically we should also auto-update CRL if --crl is set, but out of scope for basic Sprint 4 requirements.
+        return 0
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error connecting or revoking: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+def _handle_ca_gen_crl(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+    from .crl import generate_crl
+
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+
+    try:
+        out_dir = args.out_dir
+        
+        ca_name = args.ca.lower()
+        if ca_name == "root":
+            ca_cert_path = os.path.join(out_dir, "certs", "ca.cert.pem")
+            ca_key_path = os.path.join(out_dir, "private", "ca.key.pem")
+            ca_pass_file = args.ca_pass_file or os.path.join(out_dir, "secrets", "ca.pass")
+        elif ca_name == "intermediate":
+            ca_cert_path = os.path.join(out_dir, "certs", "intermediate.cert.pem")
+            ca_key_path = os.path.join(out_dir, "private", "intermediate.key.pem")
+            ca_pass_file = args.ca_pass_file or os.path.join(out_dir, "secrets", "intermediate.pass")
+        else:
+            # Assume passing exact path to CA cert, guessing the key
+            ca_cert_path = args.ca
+            ca_key_path = args.ca.replace(".cert.pem", ".key.pem").replace("certs", "private")
+            ca_pass_file = args.ca_pass_file
+            ca_name = "custom"
+
+        if not os.path.isfile(ca_cert_path) or not os.path.isfile(ca_key_path):
+            print(f"Error: Could not locate CA cert/key for '{args.ca}'", file=sys.stderr)
+            return 1
+
+        if not ca_pass_file or not os.path.isfile(ca_pass_file):
+            print(f"Error: Could not locate pass file for '{args.ca}'", file=sys.stderr)
+            return 1
+            
+        passphrase = read_passphrase(ca_pass_file)
+        
+        crl_path = generate_crl(
+            ca_name=args.ca,
+            ca_cert_path=ca_cert_path,
+            ca_key_path=ca_key_path,
+            ca_passphrase=passphrase,
+            out_dir=out_dir,
+            next_update_days=args.next_update,
+            db=db,
+            out_file=args.out_file
+        )
+        print(f"CRL generated at {crl_path}")
+        return 0
+    except Exception as e:
+        print(f"Error generating CRL: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+def _handle_ca_check_revoked(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+    
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+    
+    try:
+        record = db.get_certificate_by_serial(args.serial)
+        if not record:
+            print(f"Certificate {args.serial} not found in database.", file=sys.stderr)
+            return 1
+            
+        status = record.get("status")
+        if status == "revoked":
+            reason = record.get("revocation_reason", "unspecified")
+            date = record.get("revocation_date", "unknown")
+            print(f"Certificate {args.serial} is REVOKED since {date} (Reason: {reason})")
+            return 2 # special exit code for revoked
+        else:
+            print(f"Certificate {args.serial} is {status.upper()}")
+            return 0
+    except Exception as e:
+        print(f"Error checking status: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     sys.exit(main())
