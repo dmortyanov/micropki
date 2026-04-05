@@ -264,7 +264,109 @@ python -m micropki ca gen-crl --ca intermediate --next-update 14
 - `--ca` — уровень УЦ (`root` или `intermediate`)
 - `--next-update` — срок действия CRL в днях (по умолчанию 7)
 
+
 ---
+
+## Тестирование
+
+> Все тесты расположены в каталоге `tests/` и запускаются с помощью `pytest`.
+> Перед запуском убедитесь, что виртуальное окружение активно и зависимости установлены.
+
+### Общий запуск всех тестов
+
+```bash
+# Запустить все тесты с подробным выводом
+pytest tests/ -v
+
+# С покрытием кода
+pytest tests/ -v --cov=micropki --cov-report=term-missing
+
+# Только «упавшие» тесты (быстрая перепроверка)
+pytest tests/ -v --tb=short -x
+```
+
+---
+
+### Sprint 1 — Root CA, криптоутилиты, CLI (базовый)
+
+| Файл | Что проверяется |
+|------|-----------------|
+| `test_ca.py` | Инициализация Root CA: генерация ключа, подпись сертификата, policy.txt |
+| `test_certificates.py` | Генерация X.509 v3 сертификатов, сериализация PEM, загрузка с диска |
+| `test_crypto_utils.py` | Генерация RSA/ECC ключей, шифрование/дешифрование PEM, парсинг DN |
+| `test_cli.py` | CLI-парсер: аргументы `ca init`, валидация, обработка ошибок |
+
+```bash
+# Запуск тестов Sprint 1
+pytest tests/test_ca.py tests/test_certificates.py tests/test_crypto_utils.py tests/test_cli.py -v
+```
+
+---
+
+### Sprint 2 — Intermediate CA, шаблоны, CSR, цепочка
+
+| Файл | Что проверяется |
+|------|-----------------|
+| `test_intermediate.py` | Intermediate CA: CSR → подпись Root → цепочка, pathlen, расширения |
+| `test_csr.py` | Генерация и верификация CSR (PKCS#10) |
+| `test_templates.py` | Шаблоны `server`/`client`/`code_signing`, SAN-валидация, KeyUsage |
+| `test_chain.py` | Валидация цепочки сертификатов (leaf → intermediate → root) |
+| `test_cli_sprint2.py` | CLI: `issue-intermediate`, `issue-cert`, `validate-chain` |
+
+```bash
+# Запуск тестов Sprint 2
+pytest tests/test_intermediate.py tests/test_csr.py tests/test_templates.py tests/test_chain.py tests/test_cli_sprint2.py -v
+```
+
+---
+
+### Sprint 3 — База данных, HTTP-репозиторий, Serial
+
+| Файл | Что проверяется |
+|------|-----------------|
+| `test_sprint3_db_cli.py` | SQLite схема, CRUD операции, CLI `db init`, `list-certs`, `show-cert` |
+| `test_sprint3_repository_api.py` | HTTP-сервер: GET `/certificate/<serial>`, `/ca/root`, `/ca/intermediate`, 404/405 |
+| `test_sprint3_serial_uniqueness.py` | Уникальность серийных номеров (последовательный + случайный компонент) |
+
+```bash
+# Запуск тестов Sprint 3
+pytest tests/test_sprint3_db_cli.py tests/test_sprint3_repository_api.py tests/test_sprint3_serial_uniqueness.py -v
+```
+
+---
+
+### Sprint 4 — Отзыв сертификатов и CRL
+
+| Файл | Что проверяется |
+|------|-----------------|
+| `test_sprint4.py` | Жизненный цикл отзыва: `revoke` → статус в БД → `gen-crl` → CRL содержит серийный номер; инкремент `CRLNumber`; верификация CRL через OpenSSL |
+
+```bash
+# Запуск тестов Sprint 4
+pytest tests/test_sprint4.py -v
+```
+
+---
+
+### Верификация через OpenSSL (ручная)
+
+Помимо автоматических тестов, результаты удобно проверять через `openssl`:
+
+```bash
+# Просмотр сертификата
+openssl x509 -in pki/certs/intermediate.cert.pem -text -noout
+
+# Проверка цепочки
+openssl verify -CAfile pki/certs/ca.cert.pem \
+    -untrusted pki/certs/intermediate.cert.pem \
+    pki/certs/example.com.cert.pem
+
+# Просмотр CRL
+openssl crl -in pki/crl/intermediate.crl.pem -text -noout
+
+# Проверка подписи CRL
+openssl crl -in pki/crl/intermediate.crl.pem -CAfile pki/certs/intermediate.cert.pem -verify -noout
+```
 
 ## Конечный “сквозной” сценарий (1 → 2 → 3 → 4)
 
