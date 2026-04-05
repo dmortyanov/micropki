@@ -5,6 +5,8 @@ Provides the ``micropki`` entry point with subcommands:
 - ``ca issue-intermediate`` — create an Intermediate CA signed by Root
 - ``ca issue-cert``         — issue an end-entity certificate
 - ``ca validate-chain``     — validate a certificate chain
+- ``ca issue-ocsp-cert``   — issue an OCSP responder certificate (Sprint 5)
+- ``ocsp serve``           — start the OCSP responder (Sprint 5)
 """
 
 from __future__ import annotations
@@ -185,6 +187,36 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser = ca_sub.add_parser("check-revoked", help="Check revocation status of a certificate")
     check_parser.add_argument("serial", help="Certificate serial number in hex")
 
+    # --- ca issue-ocsp-cert (Sprint 5) ---
+    ocsp_cert_parser = ca_sub.add_parser(
+        "issue-ocsp-cert",
+        help="Issue an OCSP responder signing certificate",
+    )
+    ocsp_cert_parser.add_argument("--ca-cert", required=True, help="Issuing CA certificate (PEM)")
+    ocsp_cert_parser.add_argument("--ca-key", required=True, help="Issuing CA encrypted private key (PEM)")
+    ocsp_cert_parser.add_argument("--ca-pass-file", required=True, help="File with CA key passphrase")
+    ocsp_cert_parser.add_argument("--subject", required=True, help="OCSP Responder Distinguished Name")
+    ocsp_cert_parser.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa", help="Key algorithm (default: rsa)")
+    ocsp_cert_parser.add_argument("--key-size", type=int, default=2048, help="Key size (default: 2048)")
+    ocsp_cert_parser.add_argument("--san", action="append", default=[], help="SAN entry (e.g., dns:ocsp.example.com). Repeatable.")
+    ocsp_cert_parser.add_argument("--out-dir", default="./pki/certs", help="Output directory (default: ./pki/certs)")
+    ocsp_cert_parser.add_argument("--validity-days", type=int, default=365, help="Validity period in days (default: 365)")
+    ocsp_cert_parser.add_argument("--log-file", default=None, help="Log file path")
+
+    # --- ocsp commands (Sprint 5) ---
+    ocsp_parser = subparsers.add_parser("ocsp", help="OCSP responder operations")
+    ocsp_sub = ocsp_parser.add_subparsers(dest="ocsp_action", help="OCSP actions")
+
+    ocsp_serve_parser = ocsp_sub.add_parser("serve", help="Start the OCSP responder")
+    ocsp_serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    ocsp_serve_parser.add_argument("--port", type=int, default=8081, help="TCP port (default: 8081)")
+    ocsp_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="SQLite database path (default: ./pki/micropki.db)")
+    ocsp_serve_parser.add_argument("--responder-cert", required=True, help="OCSP signing certificate (PEM)")
+    ocsp_serve_parser.add_argument("--responder-key", required=True, help="OCSP signing private key (PEM, unencrypted)")
+    ocsp_serve_parser.add_argument("--ca-cert", required=True, help="Issuer CA certificate (PEM)")
+    ocsp_serve_parser.add_argument("--cache-ttl", type=int, default=60, help="Response cache TTL in seconds (default: 60)")
+    ocsp_serve_parser.add_argument("--log-file", default=None, help="Log file path (default: stderr)")
+
     return parser
 
 
@@ -305,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_ca_gen_crl(args)
         elif args.ca_action == "check-revoked":
             return _handle_ca_check_revoked(args)
+        elif args.ca_action == "issue-ocsp-cert":
+            return _handle_issue_ocsp_cert(args)
 
     elif args.command == "db":
         if not hasattr(args, "db_action") or args.db_action is None:
@@ -323,6 +357,14 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_repo_serve(args)
         elif args.repo_action == "status":
             return _handle_repo_status(args)
+
+    elif args.command == "ocsp":
+        if not hasattr(args, "ocsp_action") or args.ocsp_action is None:
+            parser.parse_args(["ocsp", "--help"])
+            return 1
+
+        if args.ocsp_action == "serve":
+            return _handle_ocsp_serve(args)
 
     return 0
 
@@ -756,6 +798,90 @@ def _handle_ca_check_revoked(args: argparse.Namespace) -> int:
         return 1
     finally:
         db.close()
+
+
+def _handle_issue_ocsp_cert(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .ca import issue_ocsp_certificate
+    from .serial import SerialNumberGenerator
+
+    logger = setup_logging(getattr(args, "log_file", None))
+
+    # Validate file paths
+    for attr, label in [
+        ("ca_cert", "--ca-cert"),
+        ("ca_key", "--ca-key"),
+        ("ca_pass_file", "--ca-pass-file"),
+    ]:
+        path = getattr(args, attr, None)
+        if path and not os.path.isfile(path):
+            logger.error("%s file does not exist: %s", label, path)
+            print(f"Error: {label} file does not exist: {path}", file=sys.stderr)
+            return 1
+
+    ca_passphrase = read_passphrase(args.ca_pass_file)
+
+    db_root = os.path.dirname(args.out_dir) if args.out_dir else "./pki"
+    db_path = os.path.join(db_root, "micropki.db")
+    serial_gen = SerialNumberGenerator(db_path=db_path)
+
+    try:
+        issue_ocsp_certificate(
+            ca_cert_path=args.ca_cert,
+            ca_key_path=args.ca_key,
+            ca_passphrase=ca_passphrase,
+            subject_str=args.subject,
+            key_type=args.key_type,
+            key_size=args.key_size,
+            out_dir=args.out_dir,
+            validity_days=args.validity_days,
+            logger=logger,
+            san_strings=args.san if args.san else None,
+            serial_generator=serial_gen,
+        )
+    except Exception as exc:
+        logger.error("OCSP certificate issuance failed: %s", exc)
+        print(f"Error: OCSP certificate issuance failed: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _handle_ocsp_serve(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .ocsp_responder import OCSPServer
+
+    logger = setup_logging(getattr(args, "log_file", None))
+
+    # Validate file paths
+    for attr, label in [
+        ("responder_cert", "--responder-cert"),
+        ("responder_key", "--responder-key"),
+        ("ca_cert", "--ca-cert"),
+    ]:
+        path = getattr(args, attr, None)
+        if path and not os.path.isfile(path):
+            logger.error("%s file does not exist: %s", label, path)
+            print(f"Error: {label} file does not exist: {path}", file=sys.stderr)
+            return 1
+
+    try:
+        server = OCSPServer(
+            host=args.host,
+            port=args.port,
+            db_path=args.db_path,
+            responder_cert_path=args.responder_cert,
+            responder_key_path=args.responder_key,
+            ca_cert_path=args.ca_cert,
+            cache_ttl=args.cache_ttl,
+            log_file=getattr(args, "log_file", None),
+        )
+        server.start()
+        return 0
+    except KeyboardInterrupt:
+        logger.info("OCSP responder stopped (KeyboardInterrupt).")
+        return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

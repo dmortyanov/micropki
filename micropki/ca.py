@@ -439,3 +439,193 @@ def issue_certificate(
         logger.info("No private key stored (public key from external CSR).")
 
     logger.info("End-entity certificate issuance completed successfully.")
+
+
+def issue_ocsp_certificate(
+    ca_cert_path: str,
+    ca_key_path: str,
+    ca_passphrase: bytes,
+    subject_str: str,
+    key_type: str,
+    key_size: int,
+    out_dir: str,
+    validity_days: int,
+    logger: logging.Logger,
+    san_strings: list[str] | None = None,
+    serial_generator=None,
+) -> None:
+    """Issue a special-purpose OCSP signing certificate.
+
+    The certificate profile (OSC-1):
+      - BasicConstraints: CA=FALSE, critical
+      - KeyUsage: digitalSignature only, critical
+      - ExtendedKeyUsage: id-kp-OCSPSigning (1.3.6.1.5.5.7.3.9)
+      - Private key stored UNENCRYPTED (for automated responder startup)
+
+    Args:
+        ca_cert_path: Path to the issuing CA certificate.
+        ca_key_path: Path to the issuing CA private key.
+        ca_passphrase: Passphrase for the CA key.
+        subject_str: Distinguished Name for the OCSP responder cert.
+        key_type: 'rsa' or 'ecc'.
+        key_size: Key size (RSA >= 2048, ECC >= 256).
+        out_dir: Output directory for cert and key.
+        validity_days: Validity period in days.
+        logger: Logger instance.
+        san_strings: Optional SAN entries.
+        serial_generator: Optional serial number generator.
+    """
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+
+    ca_cert = load_certificate(ca_cert_path)
+    with open(ca_key_path, "rb") as f:
+        ca_key = load_private_key(f.read(), ca_passphrase)
+
+    # Generate OCSP signer key pair
+    logger.info(
+        "Generating OCSP responder key pair (%s, %d bits)...",
+        key_type.upper(), key_size,
+    )
+    ocsp_key = generate_key(key_type, key_size)
+    logger.info("OCSP responder key generation completed.")
+
+    # Build subject name
+    dn = parse_subject_dn(subject_str)
+    subject_name = build_x509_name(dn)
+    public_key = ocsp_key.public_key()
+
+    # Certificate extensions
+    now = datetime.datetime.now(datetime.timezone.utc)
+    not_after = now + datetime.timedelta(days=validity_days)
+
+    serial_number = serial_generator.generate() if serial_generator is not None else None
+    if serial_number is None:
+        from cryptography import x509 as x509mod
+        serial_number = x509mod.random_serial_number()
+
+    from cryptography import x509 as x509mod
+    from cryptography.hazmat.primitives import hashes
+
+    ski = x509mod.SubjectKeyIdentifier.from_public_key(public_key)
+    ca_ski = ca_cert.extensions.get_extension_for_class(
+        x509mod.SubjectKeyIdentifier
+    )
+
+    # Pick hash for signing
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa, ec as _ec
+    if isinstance(ca_key, _rsa.RSAPrivateKey):
+        sign_hash = hashes.SHA256()
+    elif isinstance(ca_key, _ec.EllipticCurvePrivateKey):
+        sign_hash = hashes.SHA384()
+    else:
+        sign_hash = hashes.SHA256()
+
+    builder = (
+        x509mod.CertificateBuilder()
+        .subject_name(subject_name)
+        .issuer_name(ca_cert.subject)
+        .public_key(public_key)
+        .serial_number(serial_number)
+        .not_valid_before(now)
+        .not_valid_after(not_after)
+        # OSC-1: CA=FALSE, critical
+        .add_extension(
+            x509mod.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        # OSC-1: KeyUsage = digitalSignature only, critical
+        .add_extension(
+            x509mod.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        # OSC-1: ExtendedKeyUsage = id-kp-OCSPSigning
+        .add_extension(
+            x509mod.ExtendedKeyUsage([
+                x509mod.ObjectIdentifier("1.3.6.1.5.5.7.3.9"),  # id-kp-OCSPSigning
+            ]),
+            critical=False,
+        )
+        .add_extension(ski, critical=False)
+        .add_extension(
+            x509mod.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                ca_ski.value
+            ),
+            critical=False,
+        )
+    )
+
+    # Add SAN if provided
+    if san_strings:
+        parsed_san = parse_san_strings(san_strings)
+        from .templates import build_san_extension
+        san_ext = build_san_extension(parsed_san)
+        if san_ext is not None:
+            builder = builder.add_extension(san_ext, critical=False)
+
+    cert = builder.sign(ca_key, sign_hash)
+
+    logger.info(
+        "OCSP responder certificate issued. Serial: %s, Subject: %s",
+        format(cert.serial_number, "X"), subject_str,
+    )
+
+    # Store in DB
+    from .database import CertificateDatabase
+
+    cert_db = CertificateDatabase(_derive_db_path(out_dir))
+    cert_db.connect()
+    cert_db.init_schema()
+
+    serial_hex = format(cert.serial_number, "X")
+    subject_dn = cert.subject.rfc4514_string()
+    issuer_dn = cert.issuer.rfc4514_string()
+    not_before_str = cert.not_valid_before_utc.isoformat()
+    not_after_str = cert.not_valid_after_utc.isoformat()
+    cert_pem_bytes = serialize_certificate(cert)
+    cert_pem_text = cert_pem_bytes.decode("utf-8")
+
+    try:
+        cert_db.insert_certificate(
+            serial_hex=serial_hex,
+            subject=subject_dn,
+            issuer=issuer_dn,
+            not_before=not_before_str,
+            not_after=not_after_str,
+            cert_pem=cert_pem_text,
+            status="valid",
+        )
+    except Exception as exc:
+        logger.error("DB insertion failed for OCSP cert serial=%s: %s", serial_hex, exc)
+        cert_db.close()
+        raise
+    cert_db.close()
+
+    # Save cert
+    base_name = _safe_filename(subject_str)
+    os.makedirs(out_dir, exist_ok=True)
+
+    cert_path = os.path.join(out_dir, f"{base_name}.cert.pem")
+    save_certificate(cert_pem_bytes, cert_path)
+    logger.info("OCSP responder certificate saved to %s", os.path.abspath(cert_path))
+
+    # OSC-3: Save private key UNENCRYPTED (for automated startup)
+    key_pem = serialize_private_key_unencrypted(ocsp_key)
+    key_path = os.path.join(out_dir, f"{base_name}.key.pem")
+    save_private_key(key_pem, key_path)
+    logger.warning(
+        "WARNING: OCSP responder private key saved UNENCRYPTED to %s. "
+        "This is required for automated OCSP responder startup.",
+        os.path.abspath(key_path),
+    )
+
+    logger.info("OCSP responder certificate issuance completed successfully.")
