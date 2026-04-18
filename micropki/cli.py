@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     repo_serve_parser.add_argument("--port", type=int, default=8080, help="TCP port for the server (default: 8080)")
     repo_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="Path to the SQLite database (default: ./pki/micropki.db)")
     repo_serve_parser.add_argument("--cert-dir", default="./pki/certs", help="Directory containing PEM certificates (default: ./pki/certs)")
+    repo_serve_parser.add_argument("--rate-limit", type=float, default=100.0, help="Rate limit in tokens per second")
+    repo_serve_parser.add_argument("--rate-burst", type=int, default=50, help="Maximum burst size for rate limiter")
     repo_serve_parser.add_argument("--log-file", default=None, help="Path to a log file. If omitted, logs go to stderr")
 
     # --- repo status ---
@@ -161,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fetch a certificate by serial number and print PEM",
     )
     show_parser.add_argument("serial", help="Certificate serial number in hex")
+    show_parser.add_argument("--db-path", help="Path to SQLite database")
     show_parser.add_argument(
         "--format",
         choices=["pem"],
@@ -175,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     revoke_parser.add_argument("--crl", help="Path to CRL file to update (optional)")
     revoke_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt")
 
+    # --- ca compromise ---
+    comp_parser = ca_sub.add_parser("compromise", help="Mark a CA as compromised")
+    comp_parser.add_argument("serial", help="CA certificate serial number in hex")
+    comp_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+
     # --- ca gen-crl ---
     gen_crl_parser = ca_sub.add_parser("gen-crl", help="Generate or regenerate a CRL")
     gen_crl_parser.add_argument("--ca", required=True, help="'root', 'intermediate', or path to CA cert")
@@ -186,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --- ca check-revoked ---
     check_parser = ca_sub.add_parser("check-revoked", help="Check revocation status of a certificate")
     check_parser.add_argument("serial", help="Certificate serial number in hex")
+    check_parser.add_argument("--db-path", help="Path to SQLite database")
 
     # --- ca issue-ocsp-cert (Sprint 5) ---
     ocsp_cert_parser = ca_sub.add_parser(
@@ -215,7 +224,48 @@ def build_parser() -> argparse.ArgumentParser:
     ocsp_serve_parser.add_argument("--responder-key", required=True, help="OCSP signing private key (PEM, unencrypted)")
     ocsp_serve_parser.add_argument("--ca-cert", required=True, help="Issuer CA certificate (PEM)")
     ocsp_serve_parser.add_argument("--cache-ttl", type=int, default=60, help="Response cache TTL in seconds (default: 60)")
+    ocsp_serve_parser.add_argument("--rate-limit", type=float, default=100.0, help="Rate limit in tokens per second")
+    ocsp_serve_parser.add_argument("--rate-burst", type=int, default=50, help="Maximum burst size for rate limiter")
     ocsp_serve_parser.add_argument("--log-file", default=None, help="Log file path (default: stderr)")
+
+    # --- client commands (Sprint 6) ---
+    client_parser = subparsers.add_parser("client", help="Client tools for CSR and validation")
+    client_sub = client_parser.add_subparsers(dest="client_action", help="Client actions")
+
+    gen_csr_parser = client_sub.add_parser("gen-csr", help="Generate private key and CSR")
+    gen_csr_parser.add_argument("--subject", required=True, help="Subject DN")
+    gen_csr_parser.add_argument("--san", action="append", default=[], help="Subject Alternative Name")
+    gen_csr_parser.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa", help="Key type (default: rsa)")
+    gen_csr_parser.add_argument("--key-size", type=int, default=2048, help="Key size (default: 2048)")
+    gen_csr_parser.add_argument("--out-key", required=True, help="Output private key path")
+    gen_csr_parser.add_argument("--out-csr", required=True, help="Output CSR path")
+
+    req_cert_parser = client_sub.add_parser("request-cert", help="Request a certificate via HTTP API")
+    req_cert_parser.add_argument("--csr", required=True, help="Path to CSR")
+    req_cert_parser.add_argument("--template", required=True, help="Certificate template name")
+    req_cert_parser.add_argument("--ca-url", required=True, help="CA repository base URL")
+    req_cert_parser.add_argument("--out-cert", required=True, help="Output certificate path")
+
+    val_parser = client_sub.add_parser("validate", help="Validate certificate path")
+    val_parser.add_argument("--cert", required=True, help="Leaf certificate path")
+    val_parser.add_argument("--untrusted", action="append", default=[], help="Untrusted intermediate certificates")
+    val_parser.add_argument("--trusted", required=True, help="Trusted root certificate stack")
+    val_parser.add_argument("--mode", choices=["path", "full"], default="path", help="Validation mode")
+    val_parser.add_argument("--crl", help="Force specific CRL path/URL")
+    val_parser.add_argument("--ocsp-url", help="Force specific OCSP responder URL")
+
+    status_parser = client_sub.add_parser("check-status", help="Check certificate status standalone")
+    status_parser.add_argument("--cert", required=True, help="Certificate to check")
+    status_parser.add_argument("--ca-cert", required=True, help="Issuer certificate")
+    status_parser.add_argument("--crl", help="CRL path or URL")
+    status_parser.add_argument("--ocsp-url", help="OCSP responder URL")
+
+    # --- audit logger commands ---
+    audit_parser = subparsers.add_parser("audit", help="Audit log management")
+    audit_sub = audit_parser.add_subparsers(dest="audit_action", help="Audit actions")
+    
+    audit_verify_parser = audit_sub.add_parser("verify", help="Verify integrity of an audit log")
+    audit_verify_parser.add_argument("--log-file", required=True, help="Path to audit log file to verify")
 
     return parser
 
@@ -333,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_show_cert(args)
         elif args.ca_action == "revoke":
             return _handle_ca_revoke(args)
+        elif args.ca_action == "compromise":
+            return _handle_ca_compromise(args)
         elif args.ca_action == "gen-crl":
             return _handle_ca_gen_crl(args)
         elif args.ca_action == "check-revoked":
@@ -365,6 +417,35 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.ocsp_action == "serve":
             return _handle_ocsp_serve(args)
+
+    elif args.command == "client":
+        if not hasattr(args, "client_action") or args.client_action is None:
+            parser.parse_args(["client", "--help"])
+            return 1
+            
+        from .client import (
+            handle_client_gen_csr,
+            handle_client_request_cert,
+            handle_client_validate,
+            handle_client_check_status,
+        )
+
+        if args.client_action == "gen-csr":
+            return handle_client_gen_csr(args)
+        elif args.client_action == "request-cert":
+            return handle_client_request_cert(args)
+        elif args.client_action == "validate":
+            return handle_client_validate(args)
+        elif args.client_action == "check-status":
+            return handle_client_check_status(args)
+
+    elif args.command == "audit":
+        if not hasattr(args, "audit_action") or args.audit_action is None:
+            parser.parse_args(["audit", "--help"])
+            return 1
+            
+        if args.audit_action == "verify":
+            return _handle_audit_verify(args)
 
     return 0
 
@@ -659,6 +740,8 @@ def _handle_repo_serve(args: argparse.Namespace) -> int:
             db_path=args.db_path,
             cert_dir=args.cert_dir,
             audit_log_path=audit_log_path,
+            rate_limit=args.rate_limit,
+            rate_burst=args.rate_burst,
         )
         server.start()
         return 0
@@ -698,6 +781,14 @@ def _handle_ca_revoke(args: argparse.Namespace) -> int:
         revoked = revoke_certificate(db, args.serial, args.reason)
         if revoked:
             print(f"Successfully revoked {args.serial} with reason '{args.reason}'.")
+            from .audit import AuditLogger
+            import os
+            out_dir = "./pki"
+            audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+            audit_logger.log("revoke_certificate", {
+                "serial": args.serial,
+                "reason": args.reason
+            })
         else:
             print(f"Warning: {args.serial} is already revoked. No changes made.")
             
@@ -875,12 +966,75 @@ def _handle_ocsp_serve(args: argparse.Namespace) -> int:
             ca_cert_path=args.ca_cert,
             cache_ttl=args.cache_ttl,
             log_file=getattr(args, "log_file", None),
+            rate_limit=args.rate_limit,
+            rate_burst=args.rate_burst,
         )
         server.start()
         return 0
     except KeyboardInterrupt:
         logger.info("OCSP responder stopped (KeyboardInterrupt).")
         return 0
+
+
+def _handle_ca_compromise(args: argparse.Namespace) -> int:
+    from .database import CertificateDatabase
+    from .revocation import revoke_certificate
+
+    db_path = _get_default_db_path()
+    db = CertificateDatabase(db_path)
+    db.connect()
+    db.init_schema()
+
+    try:
+        if not args.force:
+            ans = input(f"DANGER: Are you sure you want to declare CA {args.serial} COMPROMISED? [y/N]: ")
+            if ans.lower() != 'y':
+                print("Operation cancelled.")
+                return 0
+                
+        revoked = revoke_certificate(db, args.serial, "cacompromise")
+        if revoked:
+            print(f"Successfully marked CA {args.serial} as COMPROMISED.")
+            
+            from .audit import AuditLogger
+            import os
+            out_dir = "./pki"
+            audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+            audit_logger.log("ca_compromise", {
+                "serial": args.serial,
+                "reason": "cacompromise"
+            })
+            
+        else:
+            print(f"Warning: CA {args.serial} is already revoked. No changes made.")
+            
+        return 0
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error connecting or revoking: {e}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+def _handle_audit_verify(args: argparse.Namespace) -> int:
+    from .audit import verify_audit_log
+    
+    if not os.path.isfile(args.log_file):
+        print(f"Error: Audit log file not found at {args.log_file}", file=sys.stderr)
+        return 1
+        
+    print(f"Verifying audit log at {args.log_file}...")
+    is_valid = verify_audit_log(args.log_file)
+    
+    if is_valid:
+        print("SUCCESS: Audit log is valid and untampered.")
+        return 0
+    else:
+        print("FAILED: Audit log integrity check failed!")
+        return 1
 
 
 if __name__ == "__main__":

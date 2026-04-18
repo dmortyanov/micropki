@@ -105,3 +105,31 @@ def parse_subject_dn(dn_string: str) -> dict[str, str]:
         raise ValueError("Subject DN must contain at least a CN (Common Name)")
 
     return result
+
+def load_certificates_from_pem(pem_path: str):
+    """Load one or more certificates from a PEM file."""
+    import cryptography.x509 as x509
+    from cryptography.hazmat.backends import default_backend
+    
+    with open(pem_path, "rb") as f:
+        pem_data = f.read()
+    
+    # cryptography doesn't natively parse a bundle of certs reliably, so we split by CERTIFICATE exactly
+    certs = []
+    lines = pem_data.decode("utf-8").splitlines()
+    current_cert = []
+    in_cert = False
+    
+    for line in lines:
+        if "-----BEGIN CERTIFICATE-----" in line:
+            in_cert = True
+            current_cert = [line]
+        elif "-----END CERTIFICATE-----" in line and in_cert:
+            current_cert.append(line)
+            in_cert = False
+            cert_content = "\n".join(current_cert).encode("utf-8")
+            certs.append(x509.load_pem_x509_certificate(cert_content, default_backend()))
+        elif in_cert:
+            current_cert.append(line)
+            
+    return certs

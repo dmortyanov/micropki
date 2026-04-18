@@ -2,7 +2,51 @@
 
 Минимальная инфраструктура открытых ключей (PKI) — CLI-инструмент для создания и управления Root CA, Intermediate CA и выпуска сертификатов.
 
-## Зависимости
+## Архитектура системы
+
+```mermaid
+graph TD
+    subgraph "PKI Core"
+        RootCA["Root CA (Offline)"]
+        InterCA["Intermediate CA (Issuing)"]
+        DB[(SQLite DB)]
+        Auditlog{Audit Log NDJSON}
+    end
+
+    subgraph "Servers"
+        RepoServer["Repository Server (HTTP/8080)"]
+        OCSPServer["OCSP Responder (HTTP/8081)"]
+    end
+
+    subgraph "Client Tools"
+        CLI["CLI Tool (Python)"]
+        ClientLogic["Client Validation Logic"]
+    end
+
+    RootCA -->|Signs| InterCA
+    InterCA -->|Signs| EE["End-Entity Certs"]
+    InterCA -->|Generates| CRL["CRL"]
+    
+    RepoServer -->|Reads| DB
+    RepoServer -->|Serves| CRL
+    RepoServer -->|Serves| EE
+    
+    OCSPServer -->|Queries| DB
+    
+    CLI -->|Request Cert| RepoServer
+    CLI -->|Validate| ClientLogic
+    ClientLogic -->|Check OCSP| OCSPServer
+    ClientLogic -->|Fallback CRL| RepoServer
+    
+    InterCA -->|Logs Events| Auditlog
+```
+
+## Основные возможности (Спринты 6-8)
+- **Полный цикл управления**: От Root CA до конечных сертификатов (Server, Client, Code Signing).
+- **Валидация клиента**: Встроенная проверка цепочки доверия и статуса отзыва (OCSP + CRL fallback).
+- **Безопасность и Аудит**: Криптографически защищенный журнал аудита (hash-chaining) и политики безопасности ключей.
+- **Ограничение скорости (Rate Limiting)**: Защита HTTP-эндпоинтов от перегрузки.
+- **Демонстрация**: Автоматизированный скрипт `demo.py` для быстрой проверки всех функций.
 
 - Python 3.11+
 - [`cryptography`](https://pypi.org/project/cryptography/) >= 43.0

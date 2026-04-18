@@ -368,14 +368,103 @@ openssl crl -in pki/crl/intermediate.crl.pem -text -noout
 openssl crl -in pki/crl/intermediate.crl.pem -CAfile pki/certs/intermediate.cert.pem -verify -noout
 ```
 
-## Конечный “сквозной” сценарий (1 → 2 → 3 → 4)
+---
 
-Пример последовательности (идея):
-1. `ca init` (Root CA)
-2. `ca issue-intermediate` (Intermediate CA)
-3. `ca issue-cert` (leaf сертификаты)
-4. `db init` (SQLite схема)
-5. `repo serve` (в отдельном окне)
-6. `ca revoke` и `ca gen-crl` (отзыв и генерация CRL)
-7. `curl` по `/certificate/<serial>` / `/ca/root` / `/ca/intermediate` / `/crl`
+## Sprint 5: OCSP Responder
+
+### Выпуск сертификата OCSP Responder
+```bash
+python -m micropki ca issue-ocsp-cert ^
+  --ca-cert ./pki/certs/intermediate.cert.pem ^
+  --ca-key ./pki/private/intermediate.key.pem ^
+  --ca-pass-file ./pki/secrets/intermediate.pass ^
+  --subject "CN=OCSP Responder,O=MyOrg" ^
+  --out-dir ./pki/certs
+```
+
+### Запуск OCSP сервера
+```bash
+python -m micropki ocsp serve ^
+  --db ./pki/micropki.db ^
+  --ca-cert ./pki/certs/intermediate.cert.pem ^
+  --responder-cert ./pki/certs/OCSP_Responder.cert.pem ^
+  --responder-key ./pki/certs/OCSP_Responder.key.pem ^
+  --port 8081
+```
+
+---
+
+## Sprint 6: Клиентские инструменты и Валидация (RFC 5280)
+
+### 6.1) Генерация CSR на стороне клиента (`client gen-csr`)
+```bash
+python -m micropki client gen-csr ^
+  --subject "CN=MyDevice,O=Client" ^
+  --san dns:mydevice.local ^
+  --out-key client.key.pem ^
+  --out-csr client.csr.pem
+```
+
+### 6.2) Запрос сертификата через API (`client request-cert`)
+```bash
+python -m micropki client request-cert ^
+  --csr client.csr.pem ^
+  --template client ^
+  --server http://127.0.0.1:8080 ^
+  --api-key secret_api_token ^
+  --out client.cert.pem
+```
+
+### 6.3) Проверка цепочки и статуса (`client validate`, `client check-status`)
+```bash
+# Валидация пути
+python -m micropki client validate ^
+  --cert client.cert.pem ^
+  --trusted ./pki/certs/ca.cert.pem ^
+  --untrusted ./pki/certs/intermediate.cert.pem
+
+# Проверка статуса (OCSP -> CRL)
+python -m micropki client check-status ^
+  --cert client.cert.pem ^
+  --ca-cert ./pki/certs/intermediate.cert.pem
+```
+
+---
+
+## Sprint 7: Безопасность и Аудит
+
+### 7.1) Журнал аудита с хеш-цепочкой
+Система автоматически ведет лог всех критических операций в `pki/audit.log`.
+
+**Проверка целостности лога:**
+```bash
+python -m micropki audit verify --log-file ./pki/audit.log
+```
+
+### 7.2) Управление компрометацией (`ca compromise`)
+Если ключ CA скомпрометирован, используйте эту команду для массового отзыва и логирования.
+```bash
+python -m micropki ca compromise ^
+  --ca intermediate ^
+  --ba-path ./pki/micropki.db ^
+  --audit-log ./pki/audit.log
+```
+
+---
+
+## Sprint 8: Демонстрация и Интеграция
+
+### Автоматический демо-сценарий
+Запуск полного цикла PKI (создание, выпуск, запуск серверов, отзыв, проверка):
+```bash
+python demo.py
+```
+
+### Интеграция с TLS (OpenSSL)
+Вы можете использовать выпущенные сертификаты для настройки веб-серверов.
+```bash
+# Пример запуска HTTPS сервера на Python (требует pem с ключом)
+cat client.cert.pem client.key.pem > bundle.pem
+python -m http.server 443 --ssl --cert bundle.pem
+```
 

@@ -95,6 +95,13 @@ def init_root_ca(
     _write_policy(cert, key_type, key_size, policy_path)
     logger.info("Policy document saved to %s", os.path.abspath(policy_path))
 
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("init_root_ca", {
+        "subject": subject_str,
+        "serial": format(cert.serial_number, "X")
+    })
+
     logger.info("Root CA initialisation completed successfully.")
 
 
@@ -241,6 +248,18 @@ def issue_intermediate_ca(
         os.path.join(out_dir, "policy.txt"),
     )
     logger.info("Policy document updated with Intermediate CA info.")
+
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("issue_intermediate_ca", {
+        "subject": subject_str,
+        "serial": format(inter_cert.serial_number, "X")
+    })
+    
+    from .transparency import TransparencyLog
+    ct_log = TransparencyLog(os.path.join(out_dir, "ct.log"))
+    ct_log.append_cert(inter_cert)
+
     logger.info("Intermediate CA issuance completed successfully.")
 
 
@@ -362,6 +381,10 @@ def issue_certificate(
     dn = parse_subject_dn(subject_str)
     subject_name = build_x509_name(dn)
 
+    from .policy import verify_key_policy, verify_validity_policy
+    verify_key_policy(public_key)
+    verify_validity_policy(validity_days)
+
     logger.info(
         "Issuing %s certificate for subject: %s",
         template_name,
@@ -437,6 +460,18 @@ def issue_certificate(
         )
     else:
         logger.info("No private key stored (public key from external CSR).")
+        
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("issue_certificate", {
+        "serial": format(cert.serial_number, "X"),
+        "subject": subject_str,
+        "template": template_name
+    })
+
+    from .transparency import TransparencyLog
+    ct_log = TransparencyLog(os.path.join(out_dir, "ct.log"))
+    ct_log.append_cert(cert)
 
     logger.info("End-entity certificate issuance completed successfully.")
 

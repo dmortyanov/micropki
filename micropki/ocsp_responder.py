@@ -89,6 +89,14 @@ class OCSPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Handle POST request for OCSP."""
+        if hasattr(self.server, "rate_limiter") and self.client_address:
+            if not self.server.rate_limiter.allow_request(self.client_address[0]):
+                self.send_response(429)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Too Many Requests")
+                return
+                
         start_time = time.monotonic()
 
         # Check path — accept / and /ocsp
@@ -203,6 +211,8 @@ class OCSPServer:
         ca_cert_path: str = "",
         cache_ttl: int = 60,
         log_file: Optional[str] = None,
+        rate_limit: float = 100.0,
+        rate_burst: int = 50,
     ):
         self.host = host
         self.port = port
@@ -214,6 +224,8 @@ class OCSPServer:
         self.log_file = log_file
         self.db: Optional[CertificateDatabase] = None
         self.httpd: Optional[socketserver.TCPServer] = None
+        from .ratelimit import IPRateLimiter
+        self.rate_limiter = IPRateLimiter(rate_burst, rate_limit)
 
     def start(self) -> None:
         """Start the OCSP responder server."""
@@ -249,6 +261,7 @@ class OCSPServer:
 
         try:
             self.httpd = socketserver.TCPServer((self.host, self.port), handler)
+            self.httpd.rate_limiter = self.rate_limiter
             logger.info(
                 "OCSP responder started at http://%s:%d/ocsp",
                 self.host, self.port,

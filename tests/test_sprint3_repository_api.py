@@ -231,14 +231,12 @@ def test_sprint3_repository_api_certificate_and_ca(tmp_path):
         body = resp.read()
         assert body == expected_leaf_pem
 
-    # /crl placeholder
+    # /crl endpoint (returns 404 if no CRL generated yet)
     try:
         urllib.request.urlopen(base + "/crl")
         assert False, "Expected HTTPError for /crl"
     except urllib.error.HTTPError as e:
-        assert e.code == 501
-        body = e.read().decode("utf-8").strip()
-        assert body == "CRL generation not yet implemented"
+        assert e.code == 404
 
     # Negative: invalid serial format
     try:

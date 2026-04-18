@@ -67,6 +67,11 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests."""
+        if hasattr(self.server, "rate_limiter") and self.client_address:
+            if not self.server.rate_limiter.allow_request(self.client_address[0]):
+                self._send_response_no_cache(429, 'text/plain', b'Too Many Requests')
+                return
+                
         # Parse the URL
         parsed_path = urllib.parse.urlparse(self.path)
         path = parsed_path.path
@@ -231,8 +236,92 @@ class RepositoryHandler(http.server.SimpleHTTPRequestHandler):
             b'Method Not Allowed',
         )
 
-    # Sprint 3: reject non-GET methods with 405.
     def do_POST(self) -> None:  # noqa: N802
+        if hasattr(self.server, "rate_limiter") and self.client_address:
+            if not self.server.rate_limiter.allow_request(self.client_address[0]):
+                self._send_response_no_cache(429, 'text/plain', b'Too Many Requests')
+                return
+                
+        parsed_path = urllib.parse.urlparse(self.path)
+        path = parsed_path.path
+
+        if path == '/request-cert':
+            api_key = self.headers.get("X-API-Key")
+            if not api_key:
+                self._send_response_no_cache(401, 'text/plain', b'Unauthorized: Missing X-API-Key')
+                return
+                
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self._send_response_no_cache(400, 'text/plain', b'Bad Request: Missing CSR body')
+                return
+                
+            csr_bytes = self.rfile.read(content_length)
+            
+            qs = urllib.parse.parse_qs(parsed_path.query)
+            template_name = qs.get("template", ["server"])[0]
+            
+            from .ca import issue_certificate
+            from .serial import SerialNumberGenerator
+            
+            out_dir = os.path.dirname(os.path.abspath(self.cert_dir))
+            
+            int_cert = os.path.join(self.cert_dir, "intermediate.cert.pem")
+            int_key = os.path.join(out_dir, "private", "intermediate.key.pem")
+            int_pass = os.path.join(out_dir, "private", "intermediate.pass")
+            
+            root_cert = os.path.join(self.cert_dir, "ca.cert.pem")
+            root_key = os.path.join(out_dir, "private", "ca.key.pem")
+            root_pass = os.path.join(out_dir, "private", "ca.pass")
+            
+            if os.path.exists(int_cert) and os.path.exists(int_key):
+                ca_cert_path = int_cert
+                ca_key_path = int_key
+                ca_pass_file = int_pass
+            else:
+                ca_cert_path = root_cert
+                ca_key_path = root_key
+                ca_pass_file = root_pass
+                
+            from .cli import read_passphrase
+            ca_passphrase = read_passphrase(ca_pass_file)
+            serial_gen = SerialNumberGenerator(self.db)
+            
+            import tempfile
+            tmp_csr_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as tmp:
+                    tmp.write(csr_bytes)
+                    tmp_csr_path = tmp.name
+                    
+                cert_path = issue_certificate(
+                    ca_cert_path=ca_cert_path,
+                    ca_key_path=ca_key_path,
+                    ca_passphrase=ca_passphrase,
+                    template_name=template_name,
+                    out_dir=self.cert_dir,
+                    db=self.db,
+                    serial_generator=serial_gen,
+                    subject_str=None,
+                    san_strings=[],
+                    csr_path=tmp_csr_path
+                )
+                
+                with open(cert_path, "rb") as f:
+                    cert_pem = f.read()
+                    
+                self._send_response_no_cache(201, 'application/x-pem-file', cert_pem)
+            except Exception as e:
+                logger.error("Failed to issue certificate via API: %s", e)
+                self._send_response_no_cache(500, 'text/plain', f'Error generating cert: {e}'.encode('utf-8'))
+            finally:
+                if tmp_csr_path and os.path.exists(tmp_csr_path):
+                    try:
+                        os.unlink(tmp_csr_path)
+                    except Exception:
+                        pass
+            return
+
         self._method_not_allowed()
 
     def do_PUT(self) -> None:  # noqa: N802
@@ -261,6 +350,8 @@ class RepositoryServer:
         db_path: str = "./pki/micropki.db",
         cert_dir: str = "./pki/certs",
         audit_log_path: Optional[str] = None,
+        rate_limit: float = 100.0,
+        rate_burst: int = 50,
     ):
         """
         Initialize the repository server.
@@ -278,6 +369,8 @@ class RepositoryServer:
         self.audit_log_path = audit_log_path
         self.db: Optional[CertificateDatabase] = None
         self.httpd: Optional[socketserver.TCPServer] = None
+        from .ratelimit import IPRateLimiter
+        self.rate_limiter = IPRateLimiter(rate_burst, rate_limit)
         logger.info(
             "Repository server initialized: host=%s, port=%d, db=%s, cert_dir=%s",
             host, port, db_path, cert_dir
@@ -316,6 +409,7 @@ class RepositoryServer:
         # Create server
         try:
             self.httpd = socketserver.TCPServer((self.host, self.port), handler)
+            self.httpd.rate_limiter = self.rate_limiter
             logger.info("Repository server started at http://%s:%d", self.host, self.port)
             logger.info("Press Ctrl+C to stop.")
             # Serve forever
