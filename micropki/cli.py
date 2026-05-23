@@ -212,6 +212,31 @@ def build_parser() -> argparse.ArgumentParser:
     ocsp_cert_parser.add_argument("--validity-days", type=int, default=365, help="Validity period in days (default: 365)")
     ocsp_cert_parser.add_argument("--log-file", default=None, help="Log file path")
 
+    # --- ca export (PKCS#12 container) ---
+    export_parser = ca_sub.add_parser(
+        "export",
+        help="Export CA cert and key into a PKCS#12 (.p12) container",
+    )
+    export_parser.add_argument("--ca-cert", required=True, help="CA certificate (PEM)")
+    export_parser.add_argument("--ca-key", required=True, help="CA encrypted private key (PEM)")
+    export_parser.add_argument("--ca-pass-file", required=True, help="File with CA key passphrase")
+    export_parser.add_argument("--out-p12", required=True, help="Output PKCS#12 (.p12) file path")
+    export_parser.add_argument("--p12-pass-file", required=True, help="File with passphrase for the PKCS#12 container")
+    export_parser.add_argument("--friendly-name", default="MicroPKI CA", help="Friendly name inside the container (default: MicroPKI CA)")
+    export_parser.add_argument("--log-file", default=None, help="Log file path")
+
+    # --- ca import (PKCS#12 container) ---
+    import_parser = ca_sub.add_parser(
+        "import",
+        help="Import CA cert and key from a PKCS#12 (.p12) container",
+    )
+    import_parser.add_argument("--in-p12", required=True, help="Input PKCS#12 (.p12) file path")
+    import_parser.add_argument("--p12-pass-file", required=True, help="File with passphrase for the PKCS#12 container")
+    import_parser.add_argument("--new-pass-file", required=True, help="File with passphrase for the restored PEM private key")
+    import_parser.add_argument("--out-dir", default="./pki", help="PKI base directory for restored files (default: ./pki)")
+    import_parser.add_argument("--prefix", default="ca", help="Filename prefix: ca, intermediate (default: ca)")
+    import_parser.add_argument("--log-file", default=None, help="Log file path")
+
     # --- ocsp commands (Sprint 5) ---
     ocsp_parser = subparsers.add_parser("ocsp", help="OCSP responder operations")
     ocsp_sub = ocsp_parser.add_subparsers(dest="ocsp_action", help="OCSP actions")
@@ -391,6 +416,10 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_ca_check_revoked(args)
         elif args.ca_action == "issue-ocsp-cert":
             return _handle_issue_ocsp_cert(args)
+        elif args.ca_action == "export":
+            return _handle_ca_export(args)
+        elif args.ca_action == "import":
+            return _handle_ca_import(args)
 
     elif args.command == "db":
         if not hasattr(args, "db_action") or args.db_action is None:
@@ -1035,6 +1064,80 @@ def _handle_audit_verify(args: argparse.Namespace) -> int:
     else:
         print("FAILED: Audit log integrity check failed!")
         return 1
+
+
+def _handle_ca_export(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .ca import export_ca_to_container
+
+    logger = setup_logging(getattr(args, "log_file", None))
+
+    for attr, label in [
+        ("ca_cert", "--ca-cert"),
+        ("ca_key", "--ca-key"),
+        ("ca_pass_file", "--ca-pass-file"),
+        ("p12_pass_file", "--p12-pass-file"),
+    ]:
+        path = getattr(args, attr, None)
+        if path and not os.path.isfile(path):
+            print(f"Error: {label} file does not exist: {path}", file=sys.stderr)
+            return 1
+
+    ca_passphrase = read_passphrase(args.ca_pass_file)
+    p12_passphrase = read_passphrase(args.p12_pass_file)
+
+    try:
+        export_ca_to_container(
+            cert_path=args.ca_cert,
+            key_path=args.ca_key,
+            key_passphrase=ca_passphrase,
+            container_passphrase=p12_passphrase,
+            out_path=args.out_p12,
+            logger=logger,
+            friendly_name=getattr(args, "friendly_name", "MicroPKI CA"),
+        )
+    except Exception as exc:
+        logger.error("CA export failed: %s", exc)
+        print(f"Error: CA export failed: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _handle_ca_import(args: argparse.Namespace) -> int:
+    from .logger import setup_logging
+    from .ca import import_ca_from_container
+
+    logger = setup_logging(getattr(args, "log_file", None))
+
+    for attr, label in [
+        ("in_p12", "--in-p12"),
+        ("p12_pass_file", "--p12-pass-file"),
+        ("new_pass_file", "--new-pass-file"),
+    ]:
+        path = getattr(args, attr, None)
+        if path and not os.path.isfile(path):
+            print(f"Error: {label} file does not exist: {path}", file=sys.stderr)
+            return 1
+
+    p12_passphrase = read_passphrase(args.p12_pass_file)
+    new_passphrase = read_passphrase(args.new_pass_file)
+
+    try:
+        import_ca_from_container(
+            p12_path=args.in_p12,
+            container_passphrase=p12_passphrase,
+            new_key_passphrase=new_passphrase,
+            out_dir=args.out_dir,
+            logger=logger,
+            prefix=getattr(args, "prefix", "ca"),
+        )
+    except Exception as exc:
+        logger.error("CA import failed: %s", exc)
+        print(f"Error: CA import failed: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":

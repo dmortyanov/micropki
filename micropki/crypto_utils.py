@@ -106,6 +106,60 @@ def parse_subject_dn(dn_string: str) -> dict[str, str]:
 
     return result
 
+def serialize_pkcs12(
+    cert,
+    private_key: PrivateKeyTypes,
+    passphrase: bytes,
+    friendly_name: str = "MicroPKI CA",
+) -> bytes:
+    """Serialize certificate and private key into a PKCS#12 (.p12) container.
+
+    The container is encrypted with *passphrase* using modern encryption
+    (AES-256-CBC for the key, AES-256-CBC for the certificate bag).
+
+    Args:
+        cert: An ``x509.Certificate`` object.
+        private_key: The corresponding private key.
+        passphrase: Password to encrypt the PKCS#12 archive.
+        friendly_name: Human-readable label stored inside the container.
+
+    Returns:
+        Raw bytes of the PKCS#12 archive.
+    """
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    return pkcs12.serialize_key_and_certificates(
+        name=friendly_name.encode("utf-8"),
+        key=private_key,
+        cert=cert,
+        cas=None,
+        encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+    )
+
+
+def load_pkcs12(
+    p12_data: bytes,
+    passphrase: bytes,
+) -> tuple:
+    """Load a PKCS#12 container and return ``(private_key, certificate, chain)``.
+
+    Args:
+        p12_data: Raw bytes of the PKCS#12 archive.
+        passphrase: Password used to encrypt the archive.
+
+    Returns:
+        A tuple ``(private_key, certificate, additional_certs)`` where
+        *additional_certs* is a list (possibly empty) of extra certificates
+        stored in the container.
+    """
+    from cryptography.hazmat.primitives.serialization import pkcs12
+
+    private_key, certificate, additional_certs = pkcs12.load_key_and_certificates(
+        p12_data, passphrase
+    )
+    return private_key, certificate, list(additional_certs or [])
+
+
 def load_certificates_from_pem(pem_path: str):
     """Load one or more certificates from a PEM file."""
     import cryptography.x509 as x509

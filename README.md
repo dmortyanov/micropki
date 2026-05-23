@@ -16,6 +16,7 @@
   - [OCSP Responder](#ocsp-responder)
   - [HTTP Repository](#http-repository)
   - [База данных](#база-данных)
+  - [Контейнеры PKCS#12](#контейнеры-pkcs12)
   - [Аудит](#аудит)
 - [API репозитория](#api-репозитория)
 - [OCSP Responder API](#ocsp-responder-api)
@@ -44,6 +45,7 @@
 - Симуляция Certificate Transparency
 - Rate Limiting на базе Token Bucket для защиты серверов
 - Механизм компрометации CA-ключей
+- Экспорт/импорт CA в контейнеры PKCS#12 для офлайн-хранения
 
 ## Архитектура
 
@@ -338,6 +340,81 @@ python -m micropki.cli ca list-certs --format csv
 ```bash
 python -m micropki.cli ca show-cert <SERIAL_HEX>
 ```
+
+### Контейнеры PKCS#12
+
+Формат PKCS#12 (`.p12` / `.pfx`) объединяет сертификат и закрытый ключ в единый зашифрованный контейнер. Это стандартный способ безопасного хранения учётных данных CA на внешних носителях (USB-накопителях).
+
+#### `ca export` — Экспорт CA в контейнер PKCS#12
+
+Упаковывает сертификат и закрытый ключ CA в защищённый паролем файл `.p12`.
+
+```bash
+# Подготовить пароль для контейнера
+echo "ContainerPassword" > p12_pass.txt
+
+# Экспортировать Root CA
+python -m micropki.cli ca export \\
+  --ca-cert ./pki/certs/ca.cert.pem \\
+  --ca-key ./pki/private/ca.key.pem \\
+  --ca-pass-file root_pass.txt \\
+  --out-p12 ./backup/root_ca.p12 \\
+  --p12-pass-file p12_pass.txt \\
+  --friendly-name "Production Root CA"
+
+# Экспортировать Intermediate CA
+python -m micropki.cli ca export \\
+  --ca-cert ./pki/certs/intermediate.cert.pem \\
+  --ca-key ./pki/private/intermediate.key.pem \\
+  --ca-pass-file inter_pass.txt \\
+  --out-p12 ./backup/intermediate_ca.p12 \\
+  --p12-pass-file p12_pass.txt
+```
+
+| Параметр | Обязательный | По умолчанию | Описание |
+|----------|:-----------:|:------------:|----------|
+| `--ca-cert` | да | — | Сертификат CA (PEM) |
+| `--ca-key` | да | — | Закрытый ключ CA (PEM, зашифрованный) |
+| `--ca-pass-file` | да | — | Файл с паролем от ключа CA |
+| `--out-p12` | да | — | Путь к выходному файлу `.p12` |
+| `--p12-pass-file` | да | — | Файл с паролем для контейнера |
+| `--friendly-name` | нет | `MicroPKI CA` | Метка внутри контейнера |
+| `--log-file` | нет | stderr | Путь к файлу логов |
+
+#### `ca import` — Импорт CA из контейнера PKCS#12
+
+Восстанавливает PEM-файлы (сертификат и зашифрованный ключ) из контейнера `.p12`.
+
+```bash
+# Подготовить новый пароль для ключа
+echo "NewKeyPassword" > new_pass.txt
+
+# Восстановить Root CA
+python -m micropki.cli ca import \\
+  --in-p12 ./backup/root_ca.p12 \\
+  --p12-pass-file p12_pass.txt \\
+  --new-pass-file new_pass.txt \\
+  --out-dir ./pki
+
+# Восстановить Intermediate CA
+python -m micropki.cli ca import \\
+  --in-p12 ./backup/intermediate_ca.p12 \\
+  --p12-pass-file p12_pass.txt \\
+  --new-pass-file new_pass.txt \\
+  --out-dir ./pki \\
+  --prefix intermediate
+```
+
+| Параметр | Обязательный | По умолчанию | Описание |
+|----------|:-----------:|:------------:|----------|
+| `--in-p12` | да | — | Входной файл `.p12` |
+| `--p12-pass-file` | да | — | Файл с паролем контейнера |
+| `--new-pass-file` | да | — | Файл с новым паролем для PEM-ключа |
+| `--out-dir` | нет | `./pki` | Базовая директория PKI |
+| `--prefix` | нет | `ca` | Префикс файлов: `ca`, `intermediate` |
+| `--log-file` | нет | stderr | Путь к файлу логов |
+
+> **Сценарий использования**: после `ca init` экспортируйте Root CA на USB-накопитель и удалите оригинальные PEM-файлы. При необходимости подписать новый промежуточный CA — импортируйте обратно.
 
 ### Отзыв и CRL
 

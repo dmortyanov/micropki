@@ -664,3 +664,122 @@ def issue_ocsp_certificate(
     )
 
     logger.info("OCSP responder certificate issuance completed successfully.")
+
+
+def export_ca_to_container(
+    cert_path: str,
+    key_path: str,
+    key_passphrase: bytes,
+    container_passphrase: bytes,
+    out_path: str,
+    logger: logging.Logger,
+    friendly_name: str = "MicroPKI CA",
+) -> None:
+    """Export CA certificate and private key into a PKCS#12 container.
+
+    Creates a single, password-protected ``.p12`` file suitable for
+    offline storage on external media (e.g. USB drives).
+
+    Args:
+        cert_path: Path to the CA certificate PEM file.
+        key_path: Path to the encrypted CA private key PEM file.
+        key_passphrase: Passphrase for the existing PEM private key.
+        container_passphrase: Passphrase for the output PKCS#12 archive.
+        out_path: Destination path for the ``.p12`` file.
+        logger: Logger instance.
+        friendly_name: Human-readable label inside the container.
+    """
+    from .crypto_utils import load_private_key, serialize_pkcs12
+
+    logger.info("Loading CA certificate from %s...", os.path.abspath(cert_path))
+    cert = load_certificate(cert_path)
+
+    logger.info("Loading CA private key from %s...", os.path.abspath(key_path))
+    with open(key_path, "rb") as f:
+        private_key = load_private_key(f.read(), key_passphrase)
+
+    logger.info("Creating PKCS#12 container...")
+    p12_data = serialize_pkcs12(cert, private_key, container_passphrase, friendly_name)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(p12_data)
+    logger.info("PKCS#12 container saved to %s", os.path.abspath(out_path))
+
+    # Audit
+    from .audit import AuditLogger
+    out_dir = os.path.dirname(cert_path)
+    if os.path.basename(os.path.normpath(out_dir)) == "certs":
+        out_dir = os.path.dirname(out_dir)
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("export_ca_to_container", {
+        "cert": os.path.abspath(cert_path),
+        "container": os.path.abspath(out_path),
+    })
+
+    logger.info("CA export to PKCS#12 container completed successfully.")
+
+
+def import_ca_from_container(
+    p12_path: str,
+    container_passphrase: bytes,
+    new_key_passphrase: bytes,
+    out_dir: str,
+    logger: logging.Logger,
+    prefix: str = "ca",
+) -> None:
+    """Import CA certificate and private key from a PKCS#12 container.
+
+    Restores the PEM files (certificate and encrypted private key) from
+    a ``.p12`` archive into the standard MicroPKI directory layout.
+
+    Args:
+        p12_path: Path to the PKCS#12 container file.
+        container_passphrase: Passphrase of the PKCS#12 archive.
+        new_key_passphrase: Passphrase for the restored PEM private key.
+        out_dir: PKI base output directory (will contain ``certs/`` and ``private/``).
+        logger: Logger instance.
+        prefix: Filename prefix for the restored files (default ``'ca'``).
+    """
+    from .crypto_utils import load_pkcs12, serialize_private_key
+
+    logger.info("Loading PKCS#12 container from %s...", os.path.abspath(p12_path))
+    with open(p12_path, "rb") as f:
+        p12_data = f.read()
+
+    private_key, cert, _chain = load_pkcs12(p12_data, container_passphrase)
+
+    if cert is None:
+        raise ValueError("PKCS#12 container does not contain a certificate.")
+    if private_key is None:
+        raise ValueError("PKCS#12 container does not contain a private key.")
+
+    logger.info(
+        "Container contents: Subject=%s, Serial=%s",
+        cert.subject.rfc4514_string(),
+        format(cert.serial_number, "X"),
+    )
+
+    # Restore certificate
+    cert_pem = serialize_certificate(cert)
+    cert_path = os.path.join(out_dir, "certs", f"{prefix}.cert.pem")
+    save_certificate(cert_pem, cert_path)
+    logger.info("Certificate restored to %s", os.path.abspath(cert_path))
+
+    # Restore private key (encrypted with the new passphrase)
+    key_pem = serialize_private_key(private_key, new_key_passphrase)
+    key_path = os.path.join(out_dir, "private", f"{prefix}.key.pem")
+    save_private_key(key_pem, key_path)
+    logger.info("Private key restored to %s", os.path.abspath(key_path))
+
+    # Audit
+    from .audit import AuditLogger
+    audit_logger = AuditLogger(os.path.join(out_dir, "audit.log"))
+    audit_logger.log("import_ca_from_container", {
+        "container": os.path.abspath(p12_path),
+        "subject": cert.subject.rfc4514_string(),
+        "serial": format(cert.serial_number, "X"),
+    })
+
+    logger.info("CA import from PKCS#12 container completed successfully.")
+
