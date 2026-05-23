@@ -354,20 +354,20 @@ python -m micropki.cli ca show-cert <SERIAL_HEX>
 echo "ContainerPassword" > p12_pass.txt
 
 # Экспортировать Root CA
-python -m micropki.cli ca export \\
-  --ca-cert ./pki/certs/ca.cert.pem \\
-  --ca-key ./pki/private/ca.key.pem \\
-  --ca-pass-file root_pass.txt \\
-  --out-p12 ./backup/root_ca.p12 \\
-  --p12-pass-file p12_pass.txt \\
+python -m micropki.cli ca export \
+  --ca-cert ./pki/certs/ca.cert.pem \
+  --ca-key ./pki/private/ca.key.pem \
+  --ca-pass-file root_pass.txt \
+  --out-p12 ./backup/root_ca.p12 \
+  --p12-pass-file p12_pass.txt \
   --friendly-name "Production Root CA"
 
 # Экспортировать Intermediate CA
-python -m micropki.cli ca export \\
-  --ca-cert ./pki/certs/intermediate.cert.pem \\
-  --ca-key ./pki/private/intermediate.key.pem \\
-  --ca-pass-file inter_pass.txt \\
-  --out-p12 ./backup/intermediate_ca.p12 \\
+python -m micropki.cli ca export \
+  --ca-cert ./pki/certs/intermediate.cert.pem \
+  --ca-key ./pki/private/intermediate.key.pem \
+  --ca-pass-file inter_pass.txt \
+  --out-p12 ./backup/intermediate_ca.p12 \
   --p12-pass-file p12_pass.txt
 ```
 
@@ -390,18 +390,18 @@ python -m micropki.cli ca export \\
 echo "NewKeyPassword" > new_pass.txt
 
 # Восстановить Root CA
-python -m micropki.cli ca import \\
-  --in-p12 ./backup/root_ca.p12 \\
-  --p12-pass-file p12_pass.txt \\
-  --new-pass-file new_pass.txt \\
+python -m micropki.cli ca import \
+  --in-p12 ./backup/root_ca.p12 \
+  --p12-pass-file p12_pass.txt \
+  --new-pass-file new_pass.txt \
   --out-dir ./pki
 
 # Восстановить Intermediate CA
-python -m micropki.cli ca import \\
-  --in-p12 ./backup/intermediate_ca.p12 \\
-  --p12-pass-file p12_pass.txt \\
-  --new-pass-file new_pass.txt \\
-  --out-dir ./pki \\
+python -m micropki.cli ca import \
+  --in-p12 ./backup/intermediate_ca.p12 \
+  --p12-pass-file p12_pass.txt \
+  --new-pass-file new_pass.txt \
+  --out-dir ./pki \
   --prefix intermediate
 ```
 
