@@ -8,7 +8,7 @@ from datetime import timezone
 
 from cryptography import x509
 
-from micropki.crypto_utils import generate_key, parse_subject_dn, serialize_private_key_unencrypted
+from micropki.crypto_utils import generate_key, parse_subject_dn, serialize_private_key
 from micropki.csr import generate_csr, serialize_csr, load_csr
 from micropki.certificates import load_certificate
 from micropki.chain import validate_chain, ChainValidationError
@@ -62,7 +62,16 @@ def handle_client_gen_csr(args: argparse.Namespace) -> int:
     os.makedirs(os.path.dirname(os.path.abspath(out_key_path)) or ".", exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(out_csr_path)) or ".", exist_ok=True)
     
-    key_pem = serialize_private_key_unencrypted(private_key)
+    # Read passphrase for key encryption
+    key_pass_file = getattr(args, 'key_pass_file', None)
+    if key_pass_file and os.path.isfile(key_pass_file):
+        with open(key_pass_file, 'rb') as f:
+            passphrase = f.read().rstrip(b'\n').rstrip(b'\r\n')
+    else:
+        import getpass
+        passphrase = getpass.getpass("Enter passphrase for private key: ").encode()
+
+    key_pem = serialize_private_key(private_key, passphrase)
     with open(out_key_path, "wb") as f:
         f.write(key_pem)
         
@@ -72,8 +81,7 @@ def handle_client_gen_csr(args: argparse.Namespace) -> int:
     except Exception:
         pass
         
-    print(f"WARNING: Private key saved UNENCRYPTED to {out_key_path}", file=sys.stderr)
-    logger.warning("Private key saved UNENCRYPTED with 0600 permissions to %s", out_key_path)
+    logger.info("Private key saved (encrypted) to %s", out_key_path)
     
     csr_pem = serialize_csr(csr)
     with open(out_csr_path, "wb") as f:

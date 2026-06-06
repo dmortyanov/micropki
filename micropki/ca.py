@@ -451,11 +451,11 @@ def issue_certificate(
     logger.info("Certificate saved to %s", os.path.abspath(cert_path))
 
     if ee_key is not None:
-        key_pem = serialize_private_key_unencrypted(ee_key)
+        key_pem = serialize_private_key(ee_key, ca_passphrase)
         key_path = os.path.join(out_dir, f"{base_name}.key.pem")
         save_private_key(key_pem, key_path)
-        logger.warning(
-            "WARNING: End-entity private key saved UNENCRYPTED to %s",
+        logger.info(
+            "End-entity private key saved (encrypted) to %s",
             os.path.abspath(key_path),
         )
     else:
@@ -653,13 +653,12 @@ def issue_ocsp_certificate(
     save_certificate(cert_pem_bytes, cert_path)
     logger.info("OCSP responder certificate saved to %s", os.path.abspath(cert_path))
 
-    # OSC-3: Save private key UNENCRYPTED (for automated startup)
-    key_pem = serialize_private_key_unencrypted(ocsp_key)
+    # Save private key (encrypted with CA passphrase)
+    key_pem = serialize_private_key(ocsp_key, ca_passphrase)
     key_path = os.path.join(out_dir, f"{base_name}.key.pem")
     save_private_key(key_pem, key_path)
-    logger.warning(
-        "WARNING: OCSP responder private key saved UNENCRYPTED to %s. "
-        "This is required for automated OCSP responder startup.",
+    logger.info(
+        "OCSP responder private key saved (encrypted) to %s",
         os.path.abspath(key_path),
     )
 

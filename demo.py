@@ -3,7 +3,7 @@ import subprocess
 import time
 import shutil
 import sys
-import tempfile
+import argparse
 
 def print_header(title):
     print("\n" + "="*60)
@@ -25,11 +25,19 @@ def run(cmd, cwd=None, check=True):
     return result
 
 def main():
+    parser = argparse.ArgumentParser(description="MicroPKI Demonstration Script")
+    parser.add_argument("--cleanup", action="store_true",
+                        help="Remove generated files after demo completes")
+    parser.add_argument("--out-dir", default="./demo_pki",
+                        help="Directory for demo PKI files (default: ./demo_pki)")
+    cli_args = parser.parse_args()
+
     print_header("MicroPKI Demonstration Script (Sprint 8)")
     
-    # Setup working directory
-    workspace = tempfile.mkdtemp(prefix="micropki_demo_")
-    print(f"Created temporary workspace at: {workspace}")
+    # Setup working directory — predictable path so files persist for review
+    workspace = os.path.abspath(cli_args.out_dir)
+    os.makedirs(workspace, exist_ok=True)
+    print(f"Workspace: {workspace}")
     
     # Path to micropki executable
     micropki_cmd = [sys.executable, "-m", "micropki.cli"]
@@ -159,15 +167,24 @@ def main():
         print("[PASS] Audit log verified")
 
     finally:
-        # Cleanup
+        # Stop servers
         if 'repo_proc' in locals(): 
             repo_proc.terminate()
             repo_proc.wait()
         if 'ocsp_proc' in locals(): 
             ocsp_proc.terminate()
             ocsp_proc.wait()
-        shutil.rmtree(workspace)
-        print("\nDemo Complete! Workspace cleaned up.")
+
+        if cli_args.cleanup:
+            shutil.rmtree(workspace, ignore_errors=True)
+            print(f"\nDemo Complete! Workspace cleaned up.")
+        else:
+            print(f"\nDemo Complete!")
+            print(f"Generated files are preserved at: {workspace}")
+            print(f"  - Certificates:  {os.path.join(workspace, 'pki', 'certs')}")
+            print(f"  - Private keys:  {os.path.join(workspace, 'pki', 'private')}")
+            print(f"  - Database:      {os.path.join(workspace, 'pki', 'micropki.db')}")
+            print(f"\nTo clean up later, run: python demo.py --cleanup")
 
 if __name__ == "__main__":
     main()
