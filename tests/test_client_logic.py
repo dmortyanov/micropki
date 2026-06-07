@@ -17,6 +17,10 @@ def workspace():
     shutil.rmtree(d, ignore_errors=True)
 
 def test_gen_csr_flow(workspace):
+    pass_file = os.path.join(workspace, "client.pass")
+    with open(pass_file, "w") as f:
+        f.write("ClientPass123")
+
     class Args:
         key_type = "rsa"
         key_size = 2048
@@ -24,6 +28,7 @@ def test_gen_csr_flow(workspace):
         san = ["dns:client.example.com"]
         out_key = os.path.join(workspace, "client.key.pem")
         out_csr = os.path.join(workspace, "client.csr.pem")
+        key_pass_file = pass_file
     
     res = handle_client_gen_csr(Args())
     assert res == 0

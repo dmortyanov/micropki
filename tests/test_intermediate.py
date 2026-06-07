@@ -162,8 +162,9 @@ class TestEndEntityCertificates:
         oids = [u.dotted_string for u in eku.value]
         assert "1.3.6.1.5.5.7.3.3" in oids  # codeSigning
 
-    def test_end_entity_key_is_unencrypted(self, rsa_intermediate):
-        out_dir = self._issue(
+    def test_end_entity_key_is_encrypted(self, rsa_intermediate):
+        out_dir, _, inter_pass = rsa_intermediate
+        self._issue(
             rsa_intermediate, "code_signing",
             "CN=Unencrypted Key Test",
             [],
@@ -171,8 +172,10 @@ class TestEndEntityCertificates:
         key_path = os.path.join(out_dir, "certs", "Unencrypted_Key_Test.key.pem")
         assert os.path.isfile(key_path)
         key_pem = open(key_path, "rb").read()
-        assert b"ENCRYPTED" not in key_pem
-        assert b"BEGIN PRIVATE KEY" in key_pem
+        assert b"ENCRYPTED" in key_pem
+        # Should load with the CA passphrase
+        key = load_private_key(key_pem, inter_pass)
+        assert key is not None
 
 
 class TestNegativeScenarios:

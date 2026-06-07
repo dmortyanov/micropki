@@ -184,7 +184,7 @@ def ocsp_server_port(pki_dir, intermediate_ca, ocsp_cert, db):
         open(ocsp_cert["cert_path"], "rb").read()
     )
     responder_key = serialization.load_pem_private_key(
-        open(ocsp_cert["key_path"], "rb").read(), password=None
+        open(ocsp_cert["key_path"], "rb").read(), password=b"IntermPass123"
     )
 
     # Use a fresh DB connection for the server thread
@@ -278,11 +278,11 @@ class TestOCSPSignerCertificate:
         oid_strings = [oid.dotted_string for oid in eku.value]
         assert "1.3.6.1.5.5.7.3.9" in oid_strings  # id-kp-OCSPSigning
 
-    def test_ocsp_key_is_unencrypted(self, ocsp_cert):
-        """OSC-3: Private key must be stored unencrypted."""
+    def test_ocsp_key_is_encrypted(self, ocsp_cert):
+        """OSC-3: Private key must be stored encrypted."""
         key_data = open(ocsp_cert["key_path"], "rb").read()
-        # Should load without a password
-        key = serialization.load_pem_private_key(key_data, password=None)
+        assert b"ENCRYPTED" in key_data
+        key = serialization.load_pem_private_key(key_data, password=b"IntermPass123")
         assert key is not None
 
 
@@ -549,7 +549,7 @@ class TestFullPKIWorkflowWithOCSP:
             )
             ocsp_key = serialization.load_pem_private_key(
                 open(os.path.join(tmp, "certs", "OCSP_Signer.key.pem"), "rb").read(),
-                password=None,
+                password=b"InterPassFull",
             )
 
             # Step 5: Start OCSP server
