@@ -122,6 +122,7 @@ def main():
                             "--db-path", os.path.join(workspace, "pki", "micropki.db"), 
                             "--responder-cert", os.path.join(workspace, "pki", "certs", "Demo_OCSP_Responder.cert.pem"), 
                             "--responder-key", os.path.join(workspace, "pki", "certs", "Demo_OCSP_Responder.key.pem"), 
+                            "--responder-key-pass-file", inter_pass_file,
                             "--ca-cert", os.path.join(workspace, "pki", "certs", "intermediate.cert.pem")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )

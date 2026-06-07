@@ -381,9 +381,12 @@ def issue_certificate(
     dn = parse_subject_dn(subject_str)
     subject_name = build_x509_name(dn)
 
-    from .policy import verify_key_policy, verify_validity_policy
+    from .policy import verify_key_policy, verify_validity_policy, verify_san_policy
+    from .templates import build_san_extension
     verify_key_policy(public_key)
     verify_validity_policy(validity_days)
+    san_ext = build_san_extension(parsed_san)
+    verify_san_policy(san_ext)
 
     logger.info(
         "Issuing %s certificate for subject: %s",

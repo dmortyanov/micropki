@@ -246,7 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
     ocsp_serve_parser.add_argument("--port", type=int, default=8081, help="TCP port (default: 8081)")
     ocsp_serve_parser.add_argument("--db-path", default="./pki/micropki.db", help="SQLite database path (default: ./pki/micropki.db)")
     ocsp_serve_parser.add_argument("--responder-cert", required=True, help="OCSP signing certificate (PEM)")
-    ocsp_serve_parser.add_argument("--responder-key", required=True, help="OCSP signing private key (PEM, unencrypted)")
+    ocsp_serve_parser.add_argument("--responder-key", required=True, help="OCSP signing private key (PEM)")
+    ocsp_serve_parser.add_argument("--responder-key-pass-file", default=None, help="File with passphrase for the responder private key")
     ocsp_serve_parser.add_argument("--ca-cert", required=True, help="Issuer CA certificate (PEM)")
     ocsp_serve_parser.add_argument("--cache-ttl", type=int, default=60, help="Response cache TTL in seconds (default: 60)")
     ocsp_serve_parser.add_argument("--rate-limit", type=float, default=100.0, help="Rate limit in tokens per second")
@@ -985,6 +986,10 @@ def _handle_ocsp_serve(args: argparse.Namespace) -> int:
             print(f"Error: {label} file does not exist: {path}", file=sys.stderr)
             return 1
 
+    responder_key_passphrase = None
+    if getattr(args, "responder_key_pass_file", None) and os.path.isfile(args.responder_key_pass_file):
+        responder_key_passphrase = read_passphrase(args.responder_key_pass_file)
+
     try:
         server = OCSPServer(
             host=args.host,
@@ -997,6 +1002,7 @@ def _handle_ocsp_serve(args: argparse.Namespace) -> int:
             log_file=getattr(args, "log_file", None),
             rate_limit=args.rate_limit,
             rate_burst=args.rate_burst,
+            responder_key_passphrase=responder_key_passphrase,
         )
         server.start()
         return 0

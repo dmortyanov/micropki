@@ -213,6 +213,7 @@ class OCSPServer:
         log_file: Optional[str] = None,
         rate_limit: float = 100.0,
         rate_burst: int = 50,
+        responder_key_passphrase: Optional[bytes] = None,
     ):
         self.host = host
         self.port = port
@@ -222,6 +223,7 @@ class OCSPServer:
         self.ca_cert_path = ca_cert_path
         self.cache_ttl = cache_ttl
         self.log_file = log_file
+        self.responder_key_passphrase = responder_key_passphrase
         self.db: Optional[CertificateDatabase] = None
         self.httpd: Optional[socketserver.TCPServer] = None
         from .ratelimit import IPRateLimiter
@@ -237,7 +239,7 @@ class OCSPServer:
             responder_cert = x509.load_pem_x509_certificate(f.read())
 
         with open(self.responder_key_path, "rb") as f:
-            responder_key = serialization.load_pem_private_key(f.read(), password=None)
+            responder_key = serialization.load_pem_private_key(f.read(), password=self.responder_key_passphrase)
 
         # Connect to database
         self.db = CertificateDatabase(self.db_path)
